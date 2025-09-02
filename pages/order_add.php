@@ -1,5 +1,7 @@
 <?php
-// pages/order_add.php — nieuwe bestelling (schema-agnostisch: customer_id vs customer_user_id)
+// pages/order_add.php — nieuwe bestelling (schema-agnostisch)
+// ondersteunt o.a. customer_id vs customer_user_id, reseller_id vs reseller_user_id,
+// ordered_by_user_id vs created_by_user_id
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -36,7 +38,9 @@ function first_existing_col(PDO $pdo, string $table, array $candidates): ?string
 }
 function build_tree_ids(PDO $pdo, int $rootId): array {
   if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
-  $ids = [$rootId]; $queue = [$rootId]; $seen = [$rootId=>true];
+  $ids = [$rootId];
+  $queue = [$rootId];
+  $seen = [$rootId=>true];
   while ($queue) {
     $chunk = array_splice($queue, 0, 200);
     $ph = implode(',', array_fill(0, count($chunk), '?'));
@@ -49,11 +53,7 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
   }
   return $ids;
 }
-
-/**
- * Vind de (naaste) reseller/sub-reseller boven een user in de parent-keten.
- * Retourneert de user-id van die reseller/sub, of null als niet gevonden / geen parent_user_id kolom.
- */
+/** Vind dichtstbijzijnde reseller/sub-reseller boven een user via parent_user_id-keten */
 function find_reseller_for_customer(PDO $pdo, int $userId): ?int {
   if (!column_exists($pdo,'users','parent_user_id')) return null;
   $id = $userId;
@@ -70,23 +70,23 @@ function find_reseller_for_customer(PDO $pdo, int $userId): ?int {
 }
 
 // --- kolommen van ORDERS (schema-agnostisch) ---
-$colCustomer = first_existing_col($pdo,'orders',['customer_user_id','customer_id']);
-$colReseller = first_existing_col($pdo,'orders',['reseller_user_id','reseller_id']);
-$colSim      = first_existing_col($pdo,'orders',['sim_id']);
-$colPlan     = first_existing_col($pdo,'orders',['plan_id']);
-$colStatus   = first_existing_col($pdo,'orders',['status']);
-$colCreated  = first_existing_col($pdo,'orders',['created_at']);
-$colCreatedBy= first_existing_col($pdo,'orders',['created_by_user_id']);
+$colCustomer  = first_existing_col($pdo,'orders',['customer_id','customer_user_id']);
+$colReseller  = first_existing_col($pdo,'orders',['reseller_id','reseller_user_id']);
+$colSim       = first_existing_col($pdo,'orders',['sim_id']);
+$colPlan      = first_existing_col($pdo,'orders',['plan_id']);
+$colStatus    = first_existing_col($pdo,'orders',['status']);
+$colCreated   = first_existing_col($pdo,'orders',['created_at']);
+$colOrderedBy = first_existing_col($pdo,'orders',['ordered_by_user_id','created_by_user_id']); // <-- belangrijk
 
 // --- dropdown data ---
-// 1) Klanten
+// 1) Eindklanten
 if ($isSuper) {
   if (column_exists($pdo,'users','role')) {
     $customers = $pdo->query("SELECT id,name FROM users WHERE role='customer' ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
   } else {
     $customers = $pdo->query("SELECT id,name FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
   }
-  $tree = null; // super hoeft niet te beperken
+  $tree = null;
 } else {
   $tree = build_tree_ids($pdo, (int)$me['id']);
   $ph = implode(',', array_fill(0, count($tree), '?'));
@@ -166,7 +166,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     redirect('index.php?route=order_add');
   }
 
-  // Bestaat klant echt? (FK-veilig)
+  // Bestaat klant (FK-safe)?
   $st = $pdo->prepare("SELECT COUNT(*) FROM users WHERE id = ?");
   $st->execute([$customerId]);
   if ((int)$st->fetchColumn() === 0) {
@@ -174,7 +174,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     redirect('index.php?route=order_add');
   }
 
-  // Scope-klant (behalve super)
+  // Scope check (geen beperking voor super)
   if (!$isSuper) {
     $tree = $tree ?? build_tree_ids($pdo, (int)$me['id']);
     if (!in_array($customerId, array_map('intval',$tree), true)) {
@@ -183,7 +183,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     }
   }
 
-  // SIM is vrij (FK op sim_id is prima; we blokkeren alleen bestaande niet-geannuleerde orders)
+  // SIM vrij?
   if ($colSim) {
     $st = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE $colSim = ? AND (status IS NULL OR status <> 'geannuleerd')");
     $st->execute([$simId]);
@@ -193,7 +193,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     }
   }
 
-  // Plan is geldig (en actief indien kolom bestaat)
+  // Plan geldig/actief?
   if ($colPlan) {
     $st = $pdo->prepare("SELECT COUNT(*) FROM plans WHERE id = ?" . (column_exists($pdo,'plans','is_active') ? " AND is_active = 1" : ""));
     $st->execute([$planId]);
@@ -206,23 +206,20 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   // Reseller bepalen (indien kolom bestaat)
   $resellerId = null;
   if ($colReseller) {
-    // 1) probeer reseller boven de klant te vinden
     $resellerId = find_reseller_for_customer($pdo, $customerId);
-    // 2) zo niet: neem huidige gebruiker als die reseller/sub is
     if ($resellerId === null && ($isRes || $isSubRes)) $resellerId = (int)$me['id'];
-    // super_admin zonder reseller boven de klant → blijft NULL (mag bij NULLABLE FK)
   }
 
-  // Insert samenstellen op basis van bestaande kolommen
+  // Insert samenstellen
   $fields = []; $vals = [];
 
-  if ($colCustomer) { $fields[] = "`$colCustomer`"; $vals[] = $customerId; }
-  if ($colSim)      { $fields[] = "`$colSim`";      $vals[] = $simId; }
-  if ($colPlan)     { $fields[] = "`$colPlan`";     $vals[] = $planId; }
+  if ($colCustomer)  { $fields[] = "`$colCustomer`";  $vals[] = $customerId; }
+  if ($colSim)       { $fields[] = "`$colSim`";       $vals[] = $simId; }
+  if ($colPlan)      { $fields[] = "`$colPlan`";      $vals[] = $planId; }
   if ($colReseller && $resellerId !== null) { $fields[] = "`$colReseller`"; $vals[] = $resellerId; }
-  if ($colCreatedBy){ $fields[] = "`$colCreatedBy`"; $vals[] = (int)$me['id']; }
-  if ($colStatus)   { $fields[] = "`$colStatus`";   $vals[] = 'Concept'; }
-  if ($colCreated)  { $fields[] = "`$colCreated`";  $vals[] = date('Y-m-d H:i:s'); }
+  if ($colOrderedBy) { $fields[] = "`$colOrderedBy`"; $vals[] = (int)$me['id']; } // <-- fix voor fk_o_orderedby
+  if ($colStatus)    { $fields[] = "`$colStatus`";    $vals[] = 'Concept'; }
+  if ($colCreated)   { $fields[] = "`$colCreated`";   $vals[] = date('Y-m-d H:i:s'); }
 
   if (!$fields) {
     flash_set('danger','Orders-tabel mist vereiste kolommen (minstens klant/sim/plan).');
@@ -230,7 +227,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   }
 
   $place = implode(',', array_fill(0, count($fields), '?'));
-  $sql = "INSERT INTO orders (" . implode(',', $fields) . ") VALUES ($place)";
+  $sql   = "INSERT INTO orders (" . implode(',', $fields) . ") VALUES ($place)";
+
   try {
     $st = $pdo->prepare($sql);
     $st->execute($vals);
