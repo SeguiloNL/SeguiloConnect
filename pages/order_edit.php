@@ -1,5 +1,5 @@
 <?php
-// pages/order_edit.php — veilige order weergave/bewerken zonder SQL-fouten
+// pages/order_edit.php — order bekijken + statusacties (finalize/complete)
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -13,10 +13,7 @@ $isSubRes = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role =
 $isMgr    = ($isSuper || $isRes || $isSubRes);
 
 $orderId = (int)($_GET['id'] ?? 0);
-if ($orderId <= 0) {
-  echo '<div class="alert alert-warning">Geen geldige order opgegeven.</div>';
-  return;
-}
+if ($orderId <= 0) { echo '<div class="alert alert-warning">Geen geldige order opgegeven.</div>'; return; }
 
 // ---------- DB ----------
 try { $pdo = db(); }
@@ -63,12 +60,18 @@ $ordersResellerCol   = column_exists($pdo,'orders','reseller_id') ? 'reseller_id
 $ordersHasOrderedBy  = table_exists($pdo,'orders') && column_exists($pdo,'orders','ordered_by_user_id');
 $ordersHasCreatedBy  = table_exists($pdo,'orders') && column_exists($pdo,'orders','created_by_user_id');
 
-$usersHasAddresses   = column_exists($pdo,'users','admin_contact') || column_exists($pdo,'users','connect_contact');
-
 $simsTable           = table_exists($pdo,'sims');
 $plansTable          = table_exists($pdo,'plans');
 
-// ---------- order ophalen (met LEFT JOINs) ----------
+// Status mapping (pas aan als jouw labels anders zijn)
+$statusMap = [
+  'concept'              => 'concept',
+  'awaiting_activation'  => 'awaiting_activation',
+  'completed'            => 'completed',
+  'cancelled'            => 'cancelled',
+];
+
+// ---------- order ophalen (JOINs, geen subselect-mix) ----------
 $select = ["o.id"];
 if ($ordersHasStatus)    $select[] = "o.status";
 if ($ordersHasCreatedAt) $select[] = "o.created_at";
@@ -79,7 +82,6 @@ if ($ordersResellerCol)  $select[] = "o.`{$ordersResellerCol}` AS reseller_id";
 if ($ordersHasOrderedBy) $select[] = "o.ordered_by_user_id";
 if ($ordersHasCreatedBy) $select[] = "o.created_by_user_id";
 
-// join aliases
 $joins = [];
 if ($ordersHasSim && $simsTable) {
   $select[] = "s.iccid  AS sim_iccid";
@@ -99,7 +101,6 @@ if ($ordersHasPlan && $plansTable) {
 if ($ordersCustomerCol) {
   $select[] = "cu.name  AS customer_name";
   $select[] = "cu.email AS customer_email";
-  // adresvelden (optioneel)
   foreach (['admin_contact','admin_address','admin_postcode','admin_city','connect_contact','connect_address','connect_postcode','connect_city'] as $col) {
     if (column_exists($pdo,'users',$col)) $select[] = "cu.`$col` AS cu_$col";
   }
@@ -130,14 +131,10 @@ try {
   $order = $st->fetch(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
   echo '<div class="alert alert-danger">Laden mislukt: '.e($e->getMessage()).'</div>';
-  // debug hint: echo '<pre>'.e($sql).'</pre>';
   return;
 }
 
-if (!$order) {
-  echo '<div class="alert alert-warning">Order niet gevonden.</div>';
-  return;
-}
+if (!$order) { echo '<div class="alert alert-warning">Order niet gevonden.</div>'; return; }
 
 // ---------- toegang controleren ----------
 $allowed = false;
@@ -146,15 +143,12 @@ if ($isSuper) {
 } else {
   $tree = build_tree_ids($pdo, (int)$me['id']);
   $treeInts = array_map('intval',$tree);
-  // binnen reseller-scope?
   if (!$allowed && $ordersResellerCol && isset($order['reseller_id'])) {
     if (in_array((int)$order['reseller_id'], $treeInts, true)) $allowed = true;
   }
-  // eigen klant?
   if (!$allowed && $ordersCustomerCol && isset($order['customer_id'])) {
     if (in_array((int)$order['customer_id'], $treeInts, true)) $allowed = true;
   }
-  // zelf aangemaakt?
   if (!$allowed && $ordersHasOrderedBy && isset($order['ordered_by_user_id'])) {
     if ((int)$order['ordered_by_user_id'] === (int)$me['id']) $allowed = true;
   }
@@ -162,28 +156,82 @@ if ($isSuper) {
     if ((int)$order['created_by_user_id'] === (int)$me['id']) $allowed = true;
   }
 }
-if (!$allowed) {
-  echo '<div class="alert alert-danger">Geen toegang tot deze bestelling.</div>';
-  return;
+if (!$allowed) { echo '<div class="alert alert-danger">Geen toegang tot deze bestelling.</div>'; return; }
+
+// ---------- POST-acties: finalize / complete ----------
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $ordersHasStatus) {
+  try { if (function_exists('verify_csrf')) verify_csrf(); } catch (Throwable $e) { flash_set('danger','Sessie verlopen. Probeer opnieuw.'); redirect('index.php?route=order_edit&id='.$orderId); }
+
+  $action = trim((string)($_POST['action'] ?? ''));
+
+  // herlaad actuele status
+  $st = $pdo->prepare("SELECT status FROM orders WHERE id=?");
+  $st->execute([$orderId]);
+  $curStatus = (string)$st->fetchColumn();
+
+  if ($action === 'finalize') {
+    // managers mogen van concept -> awaiting_activation
+    if (!$isMgr) { flash_set('danger','Geen rechten om te finaliseren.'); redirect('index.php?route=order_edit&id='.$orderId); }
+    if (strtolower($curStatus) !== $statusMap['concept']) {
+      flash_set('warning','Alleen concept-orders kunnen definitief gemaakt worden.');
+      redirect('index.php?route=order_edit&id='.$orderId);
+    }
+    $upd = $pdo->prepare("UPDATE orders SET status = ? WHERE id = ? LIMIT 1");
+    $upd->execute([$statusMap['awaiting_activation'], $orderId]);
+    flash_set('success','Order is definitief gemaakt (status: Wachten op activatie).');
+    redirect('index.php?route=order_edit&id='.$orderId);
+  }
+
+  if ($action === 'complete') {
+    // alleen super mag naar completed
+    if (!$isSuper) { flash_set('danger','Alleen Super-admin mag een order op voltooid zetten.'); redirect('index.php?route=order_edit&id='.$orderId); }
+    if (strtolower($curStatus) === $statusMap['completed']) {
+      flash_set('info','Order was al voltooid.');
+      redirect('index.php?route=order_edit&id='.$orderId);
+    }
+    $upd = $pdo->prepare("UPDATE orders SET status = ? WHERE id = ? LIMIT 1");
+    $upd->execute([$statusMap['completed'], $orderId]);
+    flash_set('success','Order is op voltooid gezet.');
+    redirect('index.php?route=order_edit&id='.$orderId);
+  }
+
+  flash_set('warning','Onbekende actie.');
+  redirect('index.php?route=order_edit&id='.$orderId);
 }
 
 // ---------- weergave ----------
-$status = $order['status'] ?? '';
-$isConcept = (strtolower((string)$status) === 'concept');
+$status = (string)($order['status'] ?? '');
+$isConcept = $ordersHasStatus && (strtolower($status) === $statusMap['concept']);
 
-// Flash
 echo function_exists('flash_output') ? flash_output() : '';
-
 ?>
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
   <h4 class="mb-0">Bestelling #<?= (int)$order['id'] ?></h4>
   <div class="d-flex gap-2">
-    <?php if ($isConcept && $isMgr): ?>
-      <!-- hier zou je een echte bewerk-pagina/flow kunnen maken; voor nu alleen status-knoppen als je die al hebt -->
-      <a href="index.php?route=orders_list" class="btn btn-outline-secondary btn-sm">Terug</a>
-    <?php else: ?>
-      <a href="index.php?route=orders_list" class="btn btn-outline-secondary btn-sm">Terug</a>
+    <?php if ($ordersHasStatus): ?>
+      <?php if ($isConcept && $isMgr): ?>
+        <form method="post" action="index.php?route=order_edit&id=<?= (int)$order['id'] ?>" class="d-inline">
+          <?php if (function_exists('csrf_field')) csrf_field(); ?>
+          <input type="hidden" name="action" value="finalize">
+          <button class="btn btn-primary btn-sm" type="submit"
+                  title="Maak bestelling definitief (status: Wachten op activatie)">
+            Definitief maken
+          </button>
+        </form>
+      <?php endif; ?>
+
+      <form method="post" action="index.php?route=order_edit&id=<?= (int)$order['id'] ?>" class="d-inline">
+        <?php if (function_exists('csrf_field')) csrf_field(); ?>
+        <input type="hidden" name="action" value="complete">
+        <button class="btn btn-outline-success btn-sm" type="submit"
+                <?= $isSuper ? '' : 'disabled' ?>
+                title="<?= $isSuper ? 'Markeer als voltooid' : 'Alleen Super-admin mag voltooien' ?>">
+          Markeer als voltooid
+        </button>
+      </form>
     <?php endif; ?>
+
+    <a href="index.php?route=orders_list" class="btn btn-outline-secondary btn-sm">Terug</a>
   </div>
 </div>
 
@@ -195,7 +243,7 @@ echo function_exists('flash_output') ? flash_output() : '';
         <dl class="row mb-0">
           <dt class="col-5">Order ID</dt><dd class="col-7">#<?= (int)$order['id'] ?></dd>
           <?php if ($ordersHasStatus): ?>
-            <dt class="col-5">Status</dt><dd class="col-7"><?= e($order['status'] ?? '') ?></dd>
+            <dt class="col-5">Status</dt><dd class="col-7"><?= e($status) ?></dd>
           <?php endif; ?>
           <?php if ($ordersHasCreatedAt): ?>
             <dt class="col-5">Aangemaakt op</dt><dd class="col-7"><?= e($order['created_at'] ?? '') ?></dd>
@@ -226,25 +274,22 @@ echo function_exists('flash_output') ? flash_output() : '';
             <dd class="col-7">#<?= (int)$order['customer_id'] ?> — <?= e($order['customer_name'] ?? '') ?><?php if (!empty($order['customer_email'])): ?> (<?= e($order['customer_email']) ?>)<?php endif; ?></dd>
           <?php endif; ?>
 
-          <?php if ($usersHasAddresses): ?>
-            <?php
-              $fields = [
-                'admin_contact'  => 'Adm. contact',
-                'admin_address'  => 'Adm. adres',
-                'admin_postcode' => 'Adm. postcode',
-                'admin_city'     => 'Adm. woonplaats',
-                'connect_contact'  => 'Aansl. contact',
-                'connect_address'  => 'Aansl. adres',
-                'connect_postcode' => 'Aansl. postcode',
-                'connect_city'     => 'Aansl. woonplaats',
-              ];
-              foreach ($fields as $f => $label):
-                $key = 'cu_'.$f;
-                if (array_key_exists($key, $order) && $order[$key] !== null && $order[$key] !== ''):
-            ?>
-              <dt class="col-5"><?= e($label) ?></dt><dd class="col-7"><?= nl2br(e($order[$key])) ?></dd>
-            <?php endif; endforeach; ?>
-          <?php endif; ?>
+          <?php
+            foreach ([
+              'admin_contact'    => 'Adm. contact',
+              'admin_address'    => 'Adm. adres',
+              'admin_postcode'   => 'Adm. postcode',
+              'admin_city'       => 'Adm. woonplaats',
+              'connect_contact'  => 'Aansl. contact',
+              'connect_address'  => 'Aansl. adres',
+              'connect_postcode' => 'Aansl. postcode',
+              'connect_city'     => 'Aansl. woonplaats',
+            ] as $f => $label):
+              $key = 'cu_'.$f;
+              if (array_key_exists($key, $order) && $order[$key] !== null && $order[$key] !== ''):
+          ?>
+            <dt class="col-5"><?= e($label) ?></dt><dd class="col-7"><?= nl2br(e($order[$key])) ?></dd>
+          <?php endif; endforeach; ?>
         </dl>
       </div>
     </div>
@@ -298,9 +343,3 @@ echo function_exists('flash_output') ? flash_output() : '';
     </div>
   </div>
 </div>
-
-<?php
-// Eventueel: eenvoudige edit-acties bij concept (alleen voorbeeldknoppen)
-// Formulieren hier kunnen posten naar aparte routes zoals order_update_status.php,
-// order_update_items.php etc. Zolang je maar CSRF + scope checkt.
-?>
