@@ -226,8 +226,8 @@ if ($rows) {
               <?php if ($canDelete): ?>
                 <form method="post" action="index.php?route=user_delete" class="d-inline" onsubmit="return confirm('Weet je zeker dat je deze gebruiker wil verwijderen?');">
                   <?php if (function_exists('csrf_field')) csrf_field(); ?>
-                  <input type="hidden" name="id" value="<?= $uid ?>">
-                  <button class="btn btn-outline-danger btn-sm" type="submit">Verwijderen</button>
+                            <input type="hidden" name="id" value="<?= $uid ?>">
+                            <button class="btn btn-outline-danger btn-sm" type="submit">Verwijderen</button>
                 </form>
               <?php endif; ?>
             </div>
