@@ -1,6 +1,7 @@
 <?php
 // config.php
 // Fill these in with your DirectAdmin MySQL details.
+// test
 return [
     'db' => [
         'host'    => 'localhost',
