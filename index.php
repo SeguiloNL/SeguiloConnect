@@ -132,6 +132,10 @@ try {
             include __DIR__ . '/pages/whoami.php';
             break;
 
+        case 'ajax_sims_search':
+            require __DIR__ . '/pages/ajax_sims_search.php';
+            break;
+
         default:
             // fallback: als ingelogd → dashboard, anders → login
             if (auth_user()) {

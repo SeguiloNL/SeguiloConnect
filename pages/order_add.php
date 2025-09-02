@@ -264,17 +264,24 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     <?php endif; ?>
   </div>
 
-  <div class="mb-4">
+    <div class="mb-4">
     <label class="form-label">SIM kaart</label>
-    <select class="form-select" name="sim_id" id="simSelect" required>
-      <option value="">— kies een vrije SIM —</option>
-      <?php foreach ($sims as $s): ?>
-        <option value="<?= (int)$s['id'] ?>">
-          #<?= (int)$s['id'] ?> — <?= e($s['iccid'] ?? '') ?><?= !empty($s['imsi']) ? ' (IMSI: '.e($s['imsi']).')' : '' ?>
-        </option>
-      <?php endforeach; ?>
-    </select>
-    <div class="form-text"><?= $isSuper ? 'Alle vrije SIMs worden getoond.' : 'Vrije SIMs binnen jouw beheer.' ?></div>
+
+    <div class="row g-2 align-items-end">
+      <div class="col-sm-6 col-md-4">
+        <label for="simSearch" class="form-label small mb-1">Zoek op laatste 5 cijfers</label>
+        <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5"
+               class="form-control" id="simSearch" placeholder="bijv. 12345">
+        <div class="form-text">Typ exact 5 cijfers. We laden dan alleen passende vrije SIM’s.</div>
+      </div>
+      <div class="col-sm-6 col-md-8">
+        <label for="simSelect" class="form-label small mb-1">Kies een vrije SIM</label>
+        <select class="form-select" name="sim_id" id="simSelect" required disabled>
+          <option value="">— eerst zoeken op laatste 5 cijfers —</option>
+        </select>
+      </div>
+    </div>
+    <div id="simHint" class="small text-muted mt-1"></div>
   </div>
 
   <div class="mb-4">
@@ -323,6 +330,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   const sim      = document.getElementById('simSelect');
   const plans    = document.querySelectorAll('input[name="plan_id"]');
   const btn      = document.getElementById('submitBtn');
+  const simSearch= document.getElementById('simSearch');
+  const simHint  = document.getElementById('simHint');
 
   function check() {
     const hasCustomer = customer && customer.value !== '';
@@ -331,8 +340,71 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     plans.forEach(r => { if (r.checked) hasPlan = true; });
     btn.disabled = !(hasCustomer && hasSim && hasPlan);
   }
+
   if (customer) customer.addEventListener('change', check);
   if (sim) sim.addEventListener('change', check);
   plans.forEach(r => r.addEventListener('change', check));
+
+  // --- SIM live search (exact 5 cijfers) ---
+  let ctrl = null; // abortcontroller voor snelle nieuwe zoekopdrachten
+  async function searchSims() {
+    const q = (simSearch.value || '').trim();
+    sim.innerHTML = '<option value="">— eerst zoeken op laatste 5 cijfers —</option>';
+    sim.disabled = true;
+    simHint.textContent = '';
+
+    if (!/^\d{5}$/.test(q)) {
+      check();
+      return;
+    }
+    // annuleer vorige request
+    if (ctrl) ctrl.abort();
+    ctrl = new AbortController();
+
+    simHint.textContent = 'Zoeken…';
+    try {
+      const resp = await fetch('index.php?route=ajax_sims_search&q=' + encodeURIComponent(q), {
+        signal: ctrl.signal,
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+
+      sim.innerHTML = '';
+      if (!Array.isArray(data) || data.length === 0) {
+        sim.innerHTML = '<option value="">— geen vrije SIM’s gevonden —</option>';
+        sim.disabled = true;
+        simHint.textContent = 'Geen resultaten voor *' + q + '*.';
+      } else {
+        const frag = document.createDocumentFragment();
+        const first = document.createElement('option');
+        first.value = '';
+        first.textContent = '— kies een vrije SIM —';
+        frag.appendChild(first);
+        data.forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          opt.textContent = '#' + s.id + ' — ' + (s.iccid || '') + (s.imsi ? ' (IMSI: ' + s.imsi + ')' : '');
+          frag.appendChild(opt);
+        });
+        sim.appendChild(frag);
+        sim.disabled = false;
+        simHint.textContent = data.length + ' resultaat' + (data.length === 1 ? '' : 'ten') + ' gevonden.';
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      sim.innerHTML = '<option value="">— fout bij laden —</option>';
+      sim.disabled = true;
+      simHint.textContent = 'Kon niet laden. Probeer opnieuw.';
+    } finally {
+      check();
+    }
+  }
+
+  simSearch.addEventListener('input', () => {
+    // licht debounce-achtig: wacht heel kort zodat snel typen minder requests doet
+    clearTimeout(simSearch._t);
+    simSearch._t = setTimeout(searchSims, 200);
+  });
 })();
 </script>
