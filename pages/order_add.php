@@ -260,8 +260,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && isset($_POST['do_create'
   }
 }
 
-// Weergave
-include __DIR__ . '/../views/header.php';
 ?>
 
 <h4>Nieuwe bestelling (Concept)</h4>
@@ -414,5 +412,3 @@ include __DIR__ . '/../views/header.php';
     });
   })();
 </script>
-
-<?php include __DIR__ . '/../views/footer.php'; ?>
