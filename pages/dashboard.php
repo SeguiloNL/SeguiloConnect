@@ -1,6 +1,6 @@
 <?php
 // pages/dashboard.php — robuust dashboard met eigen PDO-bootstrap en scope
-
+// nog een test
 require_once __DIR__ . '/../helpers.php';
 
 if (!function_exists('e')) { function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); } }
