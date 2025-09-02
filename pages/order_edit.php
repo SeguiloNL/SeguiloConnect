@@ -1,5 +1,5 @@
 <?php
-// pages/order_edit.php — bestelling bekijken/bewerken
+// pages/order_edit.php — veilige order weergave/bewerken zonder SQL-fouten
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -10,11 +10,19 @@ $role     = $me['role'] ?? '';
 $isSuper  = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
 $isRes    = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
 $isSubRes = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
+$isMgr    = ($isSuper || $isRes || $isSubRes);
 
+$orderId = (int)($_GET['id'] ?? 0);
+if ($orderId <= 0) {
+  echo '<div class="alert alert-warning">Geen geldige order opgegeven.</div>';
+  return;
+}
+
+// ---------- DB ----------
 try { $pdo = db(); }
-catch (Throwable $e) { echo '<div class="alert alert-danger">PDO connectie niet beschikbaar.</div>'; return; }
+catch (Throwable $e) { echo '<div class="alert alert-danger">DB niet beschikbaar: '.e($e->getMessage()).'</div>'; return; }
 
-// ---- helpers ----
+// ---------- helpers ----------
 function column_exists(PDO $pdo, string $table, string $col): bool {
   $q = $pdo->quote($col);
   $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
@@ -25,10 +33,10 @@ function table_exists(PDO $pdo, string $table): bool {
   return (bool)$pdo->query("SHOW TABLES LIKE {$q}")->fetchColumn();
 }
 function build_tree_ids(PDO $pdo, int $rootId): array {
-  if (!column_exists($pdo, 'users', 'parent_user_id')) return [$rootId];
+  if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
   $ids = [$rootId]; $queue = [$rootId]; $seen = [$rootId=>true];
   while ($queue) {
-    $chunk = array_splice($queue, 0, 100);
+    $chunk = array_splice($queue, 0, 200);
     $ph = implode(',', array_fill(0, count($chunk), '?'));
     $st = $pdo->prepare("SELECT id FROM users WHERE parent_user_id IN ($ph)");
     $st->execute($chunk);
@@ -40,294 +48,259 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
   return $ids;
 }
 
-// ---- kolommen ----
-$hasCreatedBy = column_exists($pdo,'orders','created_by_user_id');
-$hasCustomer  = column_exists($pdo,'orders','customer_user_id');
-$hasReseller  = column_exists($pdo,'orders','reseller_user_id');
-$hasSimId     = column_exists($pdo,'orders','sim_id');
-$hasPlanId    = column_exists($pdo,'orders','plan_id');
-$hasStatus    = column_exists($pdo,'orders','status');
-$hasCreatedAt = column_exists($pdo,'orders','created_at');
-$hasUpdatedAt = column_exists($pdo,'orders','updated_at');
+// ---------- schema detectie ----------
+$ordersHasSim        = table_exists($pdo,'orders') && column_exists($pdo,'orders','sim_id');
+$ordersHasPlan       = table_exists($pdo,'orders') && column_exists($pdo,'orders','plan_id');
+$ordersHasStatus     = table_exists($pdo,'orders') && column_exists($pdo,'orders','status');
+$ordersHasCreatedAt  = table_exists($pdo,'orders') && column_exists($pdo,'orders','created_at');
 
-$tblSims  = table_exists($pdo,'sims');
-$tblPlans = table_exists($pdo,'plans');
+$ordersHasCustomer   = table_exists($pdo,'orders') && (column_exists($pdo,'orders','customer_id') || column_exists($pdo,'orders','customer_user_id'));
+$ordersCustomerCol   = column_exists($pdo,'orders','customer_id') ? 'customer_id' : (column_exists($pdo,'orders','customer_user_id') ? 'customer_user_id' : null);
 
-// ---- order laden ----
-$orderId = (int)($_GET['id'] ?? 0);
-if ($orderId <= 0) { flash_set('danger','Geen geldige bestelling.'); redirect('index.php?route=orders_list'); }
+$ordersHasReseller   = table_exists($pdo,'orders') && (column_exists($pdo,'orders','reseller_id') || column_exists($pdo,'orders','reseller_user_id'));
+$ordersResellerCol   = column_exists($pdo,'orders','reseller_id') ? 'reseller_id' : (column_exists($pdo,'orders','reseller_user_id') ? 'reseller_user_id' : null);
 
-$sel = "SELECT o.*";
-$join = "";
-if ($hasCustomer) $join .= " LEFT JOIN users u_customer ON u_customer.id = o.customer_user_id ";
-if ($hasSimId && $tblSims && column_exists($pdo,'sims','iccid')) $sel .= ", (SELECT iccid FROM sims WHERE id=o.sim_id) AS sim_iccid";
-if ($hasPlanId && $tblPlans && column_exists($pdo,'plans','name')) $sel .= ", (SELECT name FROM plans WHERE id=o.plan_id) AS plan_name";
+$ordersHasOrderedBy  = table_exists($pdo,'orders') && column_exists($pdo,'orders','ordered_by_user_id');
+$ordersHasCreatedBy  = table_exists($pdo,'orders') && column_exists($pdo,'orders','created_by_user_id');
 
-$st = $pdo->prepare("SELECT $sel FROM orders o $join WHERE o.id=? LIMIT 1");
-$st->execute([$orderId]);
-$order = $st->fetch(PDO::FETCH_ASSOC);
-if (!$order) { flash_set('danger','Bestelling niet gevonden.'); redirect('index.php?route=orders_list'); }
+$usersHasAddresses   = column_exists($pdo,'users','admin_contact') || column_exists($pdo,'users','connect_contact');
 
-// ---- scope: wie mag dit zien/bewerken ----
-$inScope = false;
-if ($isSuper) {
-  $inScope = true; // Super-admin mag alles
-} else {
-  $tree = build_tree_ids($pdo, (int)$me['id']);
-  if ($hasCreatedBy && in_array((int)($order['created_by_user_id'] ?? 0), $tree, true)) $inScope = true;
-  if ($hasCustomer  && in_array((int)($order['customer_user_id'] ?? 0),   $tree, true)) $inScope = true;
+$simsTable           = table_exists($pdo,'sims');
+$plansTable          = table_exists($pdo,'plans');
+
+// ---------- order ophalen (met LEFT JOINs) ----------
+$select = ["o.id"];
+if ($ordersHasStatus)    $select[] = "o.status";
+if ($ordersHasCreatedAt) $select[] = "o.created_at";
+if ($ordersHasSim)       $select[] = "o.sim_id";
+if ($ordersHasPlan)      $select[] = "o.plan_id";
+if ($ordersCustomerCol)  $select[] = "o.`{$ordersCustomerCol}` AS customer_id";
+if ($ordersResellerCol)  $select[] = "o.`{$ordersResellerCol}` AS reseller_id";
+if ($ordersHasOrderedBy) $select[] = "o.ordered_by_user_id";
+if ($ordersHasCreatedBy) $select[] = "o.created_by_user_id";
+
+// join aliases
+$joins = [];
+if ($ordersHasSim && $simsTable) {
+  $select[] = "s.iccid  AS sim_iccid";
+  $select[] = "s.imsi   AS sim_imsi";
+  $select[] = "s.status AS sim_status";
+  $joins[]  = "LEFT JOIN sims s ON s.id = o.sim_id";
 }
-if (!$inScope) {
-  flash_set('danger','Geen toegang tot deze bestelling.');
-  redirect('index.php?route=orders_list');
+if ($ordersHasPlan && $plansTable) {
+  $select[] = "p.name               AS plan_name";
+  $select[] = "p.description        AS plan_description";
+  if (column_exists($pdo,'plans','sell_price_monthly_ex_vat')) $select[] = "p.sell_price_monthly_ex_vat AS plan_sell_pm";
+  if (column_exists($pdo,'plans','buy_price_monthly_ex_vat'))  $select[] = "p.buy_price_monthly_ex_vat  AS plan_buy_pm";
+  if (column_exists($pdo,'plans','bundle_gb'))                 $select[] = "p.bundle_gb                 AS plan_bundle_gb";
+  if (column_exists($pdo,'plans','network_operator'))          $select[] = "p.network_operator          AS plan_operator";
+  $joins[]  = "LEFT JOIN plans p ON p.id = o.plan_id";
 }
-
-// ---- mag bewerken? ----
-$editable = true;
-if ($hasStatus) {
-  $editable = (($order['status'] ?? '') === 'Concept');
+if ($ordersCustomerCol) {
+  $select[] = "cu.name  AS customer_name";
+  $select[] = "cu.email AS customer_email";
+  // adresvelden (optioneel)
+  foreach (['admin_contact','admin_address','admin_postcode','admin_city','connect_contact','connect_address','connect_postcode','connect_city'] as $col) {
+    if (column_exists($pdo,'users',$col)) $select[] = "cu.`$col` AS cu_$col";
+  }
+  $joins[]  = "LEFT JOIN users cu ON cu.id = o.`{$ordersCustomerCol}`";
 }
-
-// ---- dropdown data laden ----
-// 1) klanten
-$customers = [];
-if ($isSuper) {
-  // super: alle eindklanten (of iedereen als kolom role ontbreekt)
-  if (column_exists($pdo,'users','role')) {
-    $customers = $pdo->query("SELECT id,name FROM users WHERE role='customer' ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
-  } else {
-    $customers = $pdo->query("SELECT id,name FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
-  }
-} else {
-  $tree = build_tree_ids($pdo, (int)$me['id']);
-  $ph = implode(',', array_fill(0, count($tree), '?'));
-  if (column_exists($pdo,'users','role')) {
-    $st = $pdo->prepare("SELECT id,name FROM users WHERE role='customer' AND id IN ($ph) ORDER BY name");
-  } else {
-    $st = $pdo->prepare("SELECT id,name FROM users WHERE id IN ($ph) ORDER BY name");
-  }
-  $st->execute($tree);
-  $customers = $st->fetchAll(PDO::FETCH_ASSOC);
-  // zorg dat de huidige klant er altijd in staat
-  if ($hasCustomer && ($order['customer_user_id'] ?? null) && !in_array((int)$order['customer_user_id'], array_map('intval', array_column($customers,'id')), true)) {
-    $st = $pdo->prepare("SELECT id,name FROM users WHERE id=?");
-    $st->execute([(int)$order['customer_user_id']]);
-    if ($u = $st->fetch(PDO::FETCH_ASSOC)) array_unshift($customers, $u);
-  }
+if ($ordersResellerCol) {
+  $select[] = "re.name  AS reseller_name";
+  $joins[]  = "LEFT JOIN users re ON re.id = o.`{$ordersResellerCol}`";
+}
+if ($ordersHasOrderedBy) {
+  $select[] = "ob.name  AS ordered_by_name";
+  $joins[]  = "LEFT JOIN users ob ON ob.id = o.ordered_by_user_id";
+}
+if ($ordersHasCreatedBy) {
+  $select[] = "cb.name  AS created_by_name";
+  $joins[]  = "LEFT JOIN users cb ON cb.id = o.created_by_user_id";
 }
 
-// 2) SIMs: vrij + huidige
-$sims = [];
-if ($tblSims && $hasSimId) {
-  $params = [];
-  $scopeJoin = '';
-  if (column_exists($pdo,'sims','assigned_to_user_id') && !$isSuper) {
-    $tree = build_tree_ids($pdo, (int)$me['id']);
-    $ph = implode(',', array_fill(0, count($tree), '?'));
-    $scopeJoin = " AND (s.assigned_to_user_id IN ($ph) OR s.assigned_to_user_id IS NULL)";
-    $params = $tree;
-  }
+$sql = "SELECT ".implode(",\n       ", $select)."
+        FROM orders o
+        ".implode("\n        ", $joins)."
+        WHERE o.id = ?
+        LIMIT 1";
 
-  // SIMs die NIET in andere (niet-geannuleerde) orders zitten, plus de huidige sim
-  $sql = "
-    SELECT s.id, s.iccid, s.imsi
-    FROM sims s
-    LEFT JOIN (
-      SELECT sim_id FROM orders
-      WHERE sim_id IS NOT NULL
-        AND id <> ?
-        AND (status IS NULL OR status <> 'geannuleerd')
-      GROUP BY sim_id
-    ) o_used ON o_used.sim_id = s.id
-    WHERE (o_used.sim_id IS NULL OR s.id = ?)
-    $scopeJoin
-    ORDER BY s.id DESC
-  ";
-  array_unshift($params, $orderId, $orderId);
+try {
   $st = $pdo->prepare($sql);
-  $st->execute($params);
-  $sims = $st->fetchAll(PDO::FETCH_ASSOC);
+  $st->execute([$orderId]);
+  $order = $st->fetch(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+  echo '<div class="alert alert-danger">Laden mislukt: '.e($e->getMessage()).'</div>';
+  // debug hint: echo '<pre>'.e($sql).'</pre>';
+  return;
 }
 
-// 3) Plannen: actieve plannen + het huidige plan (ook als dat inactief is)
-$plans = [];
-if ($tblPlans && $hasPlanId) {
-  $where = [];
-  $params = [];
-  if (column_exists($pdo,'plans','is_active')) {
-    $where[] = 'is_active = 1';
-  }
-  $sql = "SELECT id, name,
-                " . (column_exists($pdo,'plans','buy_price_monthly_ex_vat') ? 'buy_price_monthly_ex_vat,' : '0 AS buy_price_monthly_ex_vat,') . "
-                " . (column_exists($pdo,'plans','sell_price_monthly_ex_vat') ? 'sell_price_monthly_ex_vat,' : '0 AS sell_price_monthly_ex_vat,') . "
-                " . (column_exists($pdo,'plans','buy_price_overage_per_mb_ex_vat') ? 'buy_price_overage_per_mb_ex_vat,' : '0 AS buy_price_overage_per_mb_ex_vat,') . "
-                " . (column_exists($pdo,'plans','sell_price_overage_per_mb_ex_vat') ? 'sell_price_overage_per_mb_ex_vat,' : '0 AS sell_price_overage_per_mb_ex_vat,') . "
-                " . (column_exists($pdo,'plans','setup_fee_ex_vat') ? 'setup_fee_ex_vat,' : '0 AS setup_fee_ex_vat,') . "
-                " . (column_exists($pdo,'plans','bundle_gb') ? 'bundle_gb,' : 'NULL AS bundle_gb,') . "
-                " . (column_exists($pdo,'plans','network_operator') ? 'network_operator' : "'' AS network_operator") . "
-         FROM plans " . ($where ? ('WHERE '.implode(' AND ', $where)) : '') . " ORDER BY name";
-  $plans = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
-
-  // Zorg dat het huidige plan altijd zichtbaar/te selecteren is
-  if (($order['plan_id'] ?? null) && !in_array((int)$order['plan_id'], array_map('intval', array_column($plans,'id')), true)) {
-    $st = $pdo->prepare("SELECT id, name,
-                " . (column_exists($pdo,'plans','buy_price_monthly_ex_vat') ? 'buy_price_monthly_ex_vat,' : '0 AS buy_price_monthly_ex_vat,') . "
-                " . (column_exists($pdo,'plans','sell_price_monthly_ex_vat') ? 'sell_price_monthly_ex_vat,' : '0 AS sell_price_monthly_ex_vat,') . "
-                " . (column_exists($pdo,'plans','buy_price_overage_per_mb_ex_vat') ? 'buy_price_overage_per_mb_ex_vat,' : '0 AS buy_price_overage_per_mb_ex_vat,') . "
-                " . (column_exists($pdo,'plans','sell_price_overage_per_mb_ex_vat') ? 'sell_price_overage_per_mb_ex_vat,' : '0 AS sell_price_overage_per_mb_ex_vat,') . "
-                " . (column_exists($pdo,'plans','setup_fee_ex_vat') ? 'setup_fee_ex_vat,' : '0 AS setup_fee_ex_vat,') . "
-                " . (column_exists($pdo,'plans','bundle_gb') ? 'bundle_gb,' : 'NULL AS bundle_gb,') . "
-                " . (column_exists($pdo,'plans','network_operator') ? 'network_operator' : "'' AS network_operator") . "
-         FROM plans WHERE id=? LIMIT 1");
-    $st->execute([(int)$order['plan_id']]);
-    if ($p = $st->fetch(PDO::FETCH_ASSOC)) array_unshift($plans, $p);
-  }
+if (!$order) {
+  echo '<div class="alert alert-warning">Order niet gevonden.</div>';
+  return;
 }
 
-// ---- POST: opslaan ----
-if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $editable) {
-  try { if (function_exists('verify_csrf')) verify_csrf(); }
-  catch (Throwable $e) { flash_set('danger','Sessie verlopen. Probeer opnieuw.'); redirect('index.php?route=order_edit&id='.$orderId); }
-
-  $customerId = (int)($_POST['customer_user_id'] ?? ($order['customer_user_id'] ?? 0));
-  $simId      = (int)($_POST['sim_id'] ?? ($order['sim_id'] ?? 0));
-  $planId     = (int)($_POST['plan_id'] ?? ($order['plan_id'] ?? 0));
-
-  if ($customerId <= 0 || $simId <= 0 || $planId <= 0) {
-    flash_set('danger','Selecteer een eindklant, SIM en abonnement.');
-    redirect('index.php?route=order_edit&id='.$orderId);
+// ---------- toegang controleren ----------
+$allowed = false;
+if ($isSuper) {
+  $allowed = true;
+} else {
+  $tree = build_tree_ids($pdo, (int)$me['id']);
+  $treeInts = array_map('intval',$tree);
+  // binnen reseller-scope?
+  if (!$allowed && $ordersResellerCol && isset($order['reseller_id'])) {
+    if (in_array((int)$order['reseller_id'], $treeInts, true)) $allowed = true;
   }
-
-  // scope check (niet nodig voor super, wel voor res/sub)
-  if (!$isSuper) {
-    $tree = build_tree_ids($pdo, (int)$me['id']);
-    if (!in_array($customerId, $tree, true)) {
-      flash_set('danger','De gekozen klant valt niet binnen jouw beheer.');
-      redirect('index.php?route=order_edit&id='.$orderId);
-    }
+  // eigen klant?
+  if (!$allowed && $ordersCustomerCol && isset($order['customer_id'])) {
+    if (in_array((int)$order['customer_id'], $treeInts, true)) $allowed = true;
   }
-
-  // sim vrij (behalve deze order)
-  $st = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE sim_id = ? AND id <> ? AND (status IS NULL OR status <> 'geannuleerd')");
-  $st->execute([$simId, $orderId]);
-  if ((int)$st->fetchColumn() > 0) {
-    flash_set('danger','De gekozen SIM is al in gebruik in een andere bestelling.');
-    redirect('index.php?route=order_edit&id='.$orderId);
+  // zelf aangemaakt?
+  if (!$allowed && $ordersHasOrderedBy && isset($order['ordered_by_user_id'])) {
+    if ((int)$order['ordered_by_user_id'] === (int)$me['id']) $allowed = true;
   }
-
-  // plan bestaat (en indien kolom is_active = 1), behalve als het hetzelfde plan is
-  if ($planId !== (int)($order['plan_id'] ?? 0)) {
-    $st = $pdo->prepare("SELECT COUNT(*) FROM plans WHERE id = ?" . (column_exists($pdo,'plans','is_active') ? " AND is_active = 1" : ""));
-    $st->execute([$planId]);
-    if ((int)$st->fetchColumn() === 0) {
-      flash_set('danger','Ongeldig of inactief abonnement.');
-      redirect('index.php?route=order_edit&id='.$orderId);
-    }
-  }
-
-  // update
-  $fields = [];
-  $vals   = [];
-
-  if ($hasCustomer) { $fields[] = 'customer_user_id = ?'; $vals[] = $customerId; }
-  if ($hasSimId)    { $fields[] = 'sim_id = ?';           $vals[] = $simId; }
-  if ($hasPlanId)   { $fields[] = 'plan_id = ?';          $vals[] = $planId; }
-  if ($hasUpdatedAt){ $fields[] = 'updated_at = ?';       $vals[] = date('Y-m-d H:i:s'); }
-
-  if ($fields) {
-    $vals[] = $orderId;
-    try {
-      $sql = "UPDATE orders SET " . implode(', ', $fields) . " WHERE id = ?";
-      $st  = $pdo->prepare($sql);
-      $st->execute($vals);
-      flash_set('success','Bestelling opgeslagen.');
-      redirect('index.php?route=orders_list');
-    } catch (Throwable $e) {
-      flash_set('danger','Opslaan mislukt: ' . $e->getMessage());
-      redirect('index.php?route=order_edit&id='.$orderId);
-    }
-  } else {
-    flash_set('warning','Niets te wijzigen.');
-    redirect('index.php?route=order_edit&id='.$orderId);
+  if (!$allowed && $ordersHasCreatedBy && isset($order['created_by_user_id'])) {
+    if ((int)$order['created_by_user_id'] === (int)$me['id']) $allowed = true;
   }
 }
+if (!$allowed) {
+  echo '<div class="alert alert-danger">Geen toegang tot deze bestelling.</div>';
+  return;
+}
 
-// ---- UI ----
+// ---------- weergave ----------
+$status = $order['status'] ?? '';
+$isConcept = (strtolower((string)$status) === 'concept');
+
+// Flash
+echo function_exists('flash_output') ? flash_output() : '';
+
 ?>
-<div class="d-flex align-items-center justify-content-between mb-3">
-  <h4 class="mb-0">Bestelling #<?= (int)$orderId ?> <?= $editable ? '' : '<span class="badge bg-secondary ms-2">niet-bewerkbaar</span>' ?></h4>
-  <a class="btn btn-secondary" href="index.php?route=orders_list">Terug</a>
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h4 class="mb-0">Bestelling #<?= (int)$order['id'] ?></h4>
+  <div class="d-flex gap-2">
+    <?php if ($isConcept && $isMgr): ?>
+      <!-- hier zou je een echte bewerk-pagina/flow kunnen maken; voor nu alleen status-knoppen als je die al hebt -->
+      <a href="index.php?route=orders_list" class="btn btn-outline-secondary btn-sm">Terug</a>
+    <?php else: ?>
+      <a href="index.php?route=orders_list" class="btn btn-outline-secondary btn-sm">Terug</a>
+    <?php endif; ?>
+  </div>
 </div>
 
-<?php if (!$editable): ?>
-  <div class="alert alert-info">Deze bestelling heeft status <strong><?= e($order['status'] ?? '-') ?></strong> en kan niet meer worden bewerkt.</div>
-<?php endif; ?>
-
-<form method="post" action="index.php?route=order_edit&id=<?= (int)$orderId ?>">
-  <?php if (function_exists('csrf_field')) csrf_field(); ?>
-
-  <div class="mb-4">
-    <label class="form-label">Eindklant</label>
-    <select class="form-select" name="customer_user_id" <?= $editable ? '' : 'disabled' ?>>
-      <?php foreach ($customers as $c): $sel = ((int)$c['id'] === (int)($order['customer_user_id'] ?? 0)) ? 'selected' : ''; ?>
-        <option value="<?= (int)$c['id'] ?>" <?= $sel ?>>#<?= (int)$c['id'] ?> — <?= e($c['name']) ?></option>
-      <?php endforeach; ?>
-    </select>
-  </div>
-
-  <div class="mb-4">
-    <label class="form-label">SIM kaart</label>
-    <select class="form-select" name="sim_id" <?= $editable ? '' : 'disabled' ?>>
-      <?php if ($sims): foreach ($sims as $s): ?>
-        <?php $sel = ((int)$s['id'] === (int)($order['sim_id'] ?? 0)) ? 'selected' : ''; ?>
-        <option value="<?= (int)$s['id'] ?>" <?= $sel ?>>
-          #<?= (int)$s['id'] ?> — <?= e($s['iccid'] ?? '') ?><?= !empty($s['imsi']) ? ' (IMSI: '.e($s['imsi']).')' : '' ?>
-        </option>
-      <?php endforeach; else: ?>
-        <option value="">— geen beschikbare SIMs —</option>
-      <?php endif; ?>
-    </select>
-  </div>
-
-  <div class="mb-4">
-    <label class="form-label d-block">Abonnement</label>
-    <?php if (!$plans): ?>
-      <div class="alert alert-warning">Er zijn (nog) geen plannen beschikbaar.</div>
-    <?php else: ?>
-      <div class="row g-3">
-        <?php foreach ($plans as $p): ?>
-          <?php $checked = ((int)$p['id'] === (int)($order['plan_id'] ?? 0)) ? 'checked' : ''; ?>
-          <div class="col-md-6">
-            <label class="w-100">
-              <input class="form-check-input me-2" type="radio" name="plan_id" value="<?= (int)$p['id'] ?>" <?= $checked ?> <?= $editable ? '' : 'disabled' ?>>
-              <div class="card">
-                <div class="card-body py-3">
-                  <div class="d-flex justify-content-between align-items-center">
-                    <h6 class="mb-0"><?= e($p['name']) ?></h6>
-                    <small class="text-muted">ID: <?= (int)$p['id'] ?></small>
-                  </div>
-                  <div class="mt-2 small">
-                    <div><strong>Inkoop p/m (ex):</strong> € <?= number_format((float)$p['buy_price_monthly_ex_vat'], 2, ',', '.') ?></div>
-                    <div><strong>Verkoop p/m (ex):</strong> € <?= number_format((float)$p['sell_price_monthly_ex_vat'], 2, ',', '.') ?></div>
-                    <div><strong>Overage inkoop (ex)/MB:</strong> € <?= number_format((float)$p['buy_price_overage_per_mb_ex_vat'], 4, ',', '.') ?></div>
-                    <div><strong>Overage advies (ex)/MB:</strong> € <?= number_format((float)$p['sell_price_overage_per_mb_ex_vat'], 4, ',', '.') ?></div>
-                    <div><strong>Setup (ex):</strong> € <?= number_format((float)$p['setup_fee_ex_vat'], 2, ',', '.') ?></div>
-                    <div><strong>Bundel (GB):</strong> <?= e($p['bundle_gb'] ?? '-') ?></div>
-                    <div><strong>Operator:</strong> <?= e($p['network_operator'] ?? '-') ?></div>
-                  </div>
-                </div>
-              </div>
-            </label>
-          </div>
-        <?php endforeach; ?>
+<div class="row gy-3">
+  <div class="col-12 col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h5 class="card-title">Ordergegevens</h5>
+        <dl class="row mb-0">
+          <dt class="col-5">Order ID</dt><dd class="col-7">#<?= (int)$order['id'] ?></dd>
+          <?php if ($ordersHasStatus): ?>
+            <dt class="col-5">Status</dt><dd class="col-7"><?= e($order['status'] ?? '') ?></dd>
+          <?php endif; ?>
+          <?php if ($ordersHasCreatedAt): ?>
+            <dt class="col-5">Aangemaakt op</dt><dd class="col-7"><?= e($order['created_at'] ?? '') ?></dd>
+          <?php endif; ?>
+          <?php if ($ordersHasReseller && isset($order['reseller_id'])): ?>
+            <dt class="col-5">Reseller</dt><dd class="col-7">
+              #<?= (int)$order['reseller_id'] ?> — <?= e($order['reseller_name'] ?? '') ?>
+            </dd>
+          <?php endif; ?>
+          <?php if ($ordersHasOrderedBy): ?>
+            <dt class="col-5">Besteld door</dt><dd class="col-7"><?= e($order['ordered_by_name'] ?? '') ?></dd>
+          <?php endif; ?>
+          <?php if ($ordersHasCreatedBy): ?>
+            <dt class="col-5">Aangemaakt door</dt><dd class="col-7"><?= e($order['created_by_name'] ?? '') ?></dd>
+          <?php endif; ?>
+        </dl>
       </div>
-    <?php endif; ?>
+    </div>
   </div>
 
-  <div class="mt-4 d-flex gap-2">
-    <?php if ($editable): ?>
-      <button type="submit" class="btn btn-primary">Opslaan</button>
-    <?php endif; ?>
-    <a class="btn btn-outline-secondary" href="index.php?route=orders_list">Annuleren</a>
+  <div class="col-12 col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h5 class="card-title">Eindklant</h5>
+        <dl class="row mb-0">
+          <?php if ($ordersCustomerCol && isset($order['customer_id'])): ?>
+            <dt class="col-5">Klant</dt>
+            <dd class="col-7">#<?= (int)$order['customer_id'] ?> — <?= e($order['customer_name'] ?? '') ?><?php if (!empty($order['customer_email'])): ?> (<?= e($order['customer_email']) ?>)<?php endif; ?></dd>
+          <?php endif; ?>
+
+          <?php if ($usersHasAddresses): ?>
+            <?php
+              $fields = [
+                'admin_contact'  => 'Adm. contact',
+                'admin_address'  => 'Adm. adres',
+                'admin_postcode' => 'Adm. postcode',
+                'admin_city'     => 'Adm. woonplaats',
+                'connect_contact'  => 'Aansl. contact',
+                'connect_address'  => 'Aansl. adres',
+                'connect_postcode' => 'Aansl. postcode',
+                'connect_city'     => 'Aansl. woonplaats',
+              ];
+              foreach ($fields as $f => $label):
+                $key = 'cu_'.$f;
+                if (array_key_exists($key, $order) && $order[$key] !== null && $order[$key] !== ''):
+            ?>
+              <dt class="col-5"><?= e($label) ?></dt><dd class="col-7"><?= nl2br(e($order[$key])) ?></dd>
+            <?php endif; endforeach; ?>
+          <?php endif; ?>
+        </dl>
+      </div>
+    </div>
   </div>
-</form>
+
+  <div class="col-12 col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h5 class="card-title">SIM-kaart</h5>
+        <?php if ($ordersHasSim && !empty($order['sim_id'])): ?>
+          <dl class="row mb-0">
+            <dt class="col-5">SIM ID</dt><dd class="col-7">#<?= (int)$order['sim_id'] ?></dd>
+            <dt class="col-5">ICCID</dt><dd class="col-7"><?= e($order['sim_iccid'] ?? '') ?></dd>
+            <dt class="col-5">IMSI</dt><dd class="col-7"><?= e($order['sim_imsi'] ?? '') ?></dd>
+            <dt class="col-5">Status</dt><dd class="col-7"><?= e($order['sim_status'] ?? '') ?></dd>
+          </dl>
+        <?php else: ?>
+          <div class="text-muted">Geen SIM gekoppeld.</div>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h5 class="card-title">Abonnement</h5>
+        <?php if ($ordersHasPlan && !empty($order['plan_id'])): ?>
+          <dl class="row mb-0">
+            <dt class="col-5">Plan</dt><dd class="col-7">#<?= (int)$order['plan_id'] ?> — <?= e($order['plan_name'] ?? '') ?></dd>
+            <?php if (!empty($order['plan_description'])): ?>
+              <dt class="col-5">Omschrijving</dt><dd class="col-7"><?= nl2br(e($order['plan_description'])) ?></dd>
+            <?php endif; ?>
+            <?php if (isset($order['plan_sell_pm'])): ?>
+              <dt class="col-5">Verkoop p/m (ex)</dt><dd class="col-7">€ <?= number_format((float)$order['plan_sell_pm'], 2, ',', '.') ?></dd>
+            <?php endif; ?>
+            <?php if (isset($order['plan_buy_pm'])): ?>
+              <dt class="col-5">Inkoop p/m (ex)</dt><dd class="col-7">€ <?= number_format((float)$order['plan_buy_pm'], 2, ',', '.') ?></dd>
+            <?php endif; ?>
+            <?php if (isset($order['plan_bundle_gb'])): ?>
+              <dt class="col-5">Bundel</dt><dd class="col-7"><?= e((string)$order['plan_bundle_gb']) ?> GB</dd>
+            <?php endif; ?>
+            <?php if (!empty($order['plan_operator'])): ?>
+              <dt class="col-5">Netwerk</dt><dd class="col-7"><?= e($order['plan_operator']) ?></dd>
+            <?php endif; ?>
+          </dl>
+        <?php else: ?>
+          <div class="text-muted">Geen abonnement gekoppeld.</div>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+</div>
+
+<?php
+// Eventueel: eenvoudige edit-acties bij concept (alleen voorbeeldknoppen)
+// Formulieren hier kunnen posten naar aparte routes zoals order_update_status.php,
+// order_update_items.php etc. Zolang je maar CSRF + scope checkt.
+?>
