@@ -1,5 +1,6 @@
 <?php
 // pages/dashboard.php — robuust dashboard met eigen PDO-bootstrap en scope
+// test
 
 require_once __DIR__ . '/../helpers.php';
 
