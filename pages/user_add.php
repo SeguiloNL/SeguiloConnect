@@ -1,5 +1,5 @@
 <?php
-// pages/user_add.php
+// pages/user_add.php — gebruiker toevoegen met Administratief + Aansluitadres
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -10,276 +10,367 @@ $role     = $me['role'] ?? '';
 $isSuper  = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
 $isRes    = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
 $isSubRes = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
+$isMgr    = ($isSuper || $isRes || $isSubRes);
 
-if (!($isSuper || $isRes || $isSubRes)) {
-  flash_set('danger','Je hebt geen rechten om gebruikers aan te maken.');
+// Alleen managers mogen gebruikers toevoegen
+if (!$isMgr) {
+  flash_set('danger','Je hebt geen rechten om gebruikers toe te voegen.');
   redirect('index.php?route=users_list');
 }
 
+// ----- DB -----
 try { $pdo = db(); }
-catch (Throwable $e) {
-  echo '<div class="alert alert-danger">PDO connectie niet beschikbaar.</div>';
-  return;
-}
+catch (Throwable $e) { echo '<div class="alert alert-danger">DB niet beschikbaar: '.e($e->getMessage()).'</div>'; return; }
 
-// Helpers
+// ----- helpers -----
 function column_exists(PDO $pdo, string $table, string $col): bool {
   $q = $pdo->quote($col);
   $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
   return $st ? (bool)$st->fetch(PDO::FETCH_ASSOC) : false;
 }
-
-// Kolommen detecteren
-$hasParent     = column_exists($pdo,'users','parent_user_id');
-$hasIsActive   = column_exists($pdo,'users','is_active');
-$hasRole       = column_exists($pdo,'users','role');
-
-// Admin adres
-$hasAdminContact  = column_exists($pdo,'users','admin_contact');
-$hasAdminAddress  = column_exists($pdo,'users','admin_address');
-$hasAdminPostcode = column_exists($pdo,'users','admin_postcode');
-$hasAdminCity     = column_exists($pdo,'users','admin_city');
-
-// Aansluitadres
-$hasConnContact   = column_exists($pdo,'users','connect_contact');
-$hasConnAddress   = column_exists($pdo,'users','connect_address');
-$hasConnPostcode  = column_exists($pdo,'users','connect_postcode');
-$hasConnCity      = column_exists($pdo,'users','connect_city');
-
-// Parent-keuze (alleen super-admin krijgt een selector)
-$parentChoices = [];
-if ($isSuper && $hasParent) {
-  // eenvoudige lijst van alle gebruikers (je kunt dit later filteren of zoeken)
-  $parentChoices = $pdo->query("SELECT id,name,role FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
-}
-
-// POST: opslaan
-if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
-  try { if (function_exists('verify_csrf')) verify_csrf(); }
-  catch(Throwable $e){ flash_set('danger','Sessie verlopen. Probeer opnieuw.'); redirect('index.php?route=user_add'); }
-
-  $name  = trim((string)($_POST['name']  ?? ''));
-  $email = trim((string)($_POST['email'] ?? ''));
-  if ($name === '' || $email === '') {
-    flash_set('danger','Naam en e-mail zijn verplicht.');
-    redirect('index.php?route=user_add');
-  }
-
-  // Rol bepalen binnen rechten
-  $newRole = 'customer';
-  if ($hasRole) {
-    $requested = (string)($_POST['role'] ?? 'customer');
-    if ($isSuper) {
-      $newRole = in_array($requested, ['super_admin','reseller','sub_reseller','customer'], true) ? $requested : 'customer';
-    } elseif ($isRes) {
-      $newRole = in_array($requested, ['sub_reseller','customer'], true) ? $requested : 'customer';
-    } elseif ($isSubRes) {
-      $newRole = 'customer';
+function build_tree_ids(PDO $pdo, int $rootId): array {
+  if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
+  $ids = [$rootId]; $queue = [$rootId]; $seen = [$rootId=>true];
+  while ($queue) {
+    $chunk = array_splice($queue, 0, 200);
+    $ph = implode(',', array_fill(0, count($chunk), '?'));
+    $st = $pdo->prepare("SELECT id FROM users WHERE parent_user_id IN ($ph)");
+    $st->execute($chunk);
+    foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $cid) {
+      $cid = (int)$cid;
+      if (!isset($seen[$cid])) { $seen[$cid]=true; $ids[]=$cid; $queue[]=$cid; }
     }
   }
+  return $ids;
+}
 
-  // parent_user_id bepalen
+// detecteer optionele kolommen (adresvelden)
+$hasParent           = column_exists($pdo,'users','parent_user_id');
+$hasIsActive         = column_exists($pdo,'users','is_active');
+$hasPhone            = column_exists($pdo,'users','phone');
+
+$hasAdminContact     = column_exists($pdo,'users','admin_contact');
+$hasAdminAddress     = column_exists($pdo,'users','admin_address');
+$hasAdminPostcode    = column_exists($pdo,'users','admin_postcode');
+$hasAdminCity        = column_exists($pdo,'users','admin_city');
+
+$hasConnectContact   = column_exists($pdo,'users','connect_contact');
+$hasConnectAddress   = column_exists($pdo,'users','connect_address');
+$hasConnectPostcode  = column_exists($pdo,'users','connect_postcode');
+$hasConnectCity      = column_exists($pdo,'users','connect_city');
+
+// Toegestane rollen per aanmaker
+$allRoles = ['super_admin','reseller','sub_reseller','customer'];
+if ($isSuper) {
+  $allowedNewRoles = ['reseller','sub_reseller','customer']; // super kan iedereen aanmaken behalve nóg een super? (pas desgewenst aan)
+} elseif ($isRes) {
+  $allowedNewRoles = ['sub_reseller','customer'];
+} else { // sub_reseller
+  $allowedNewRoles = ['customer'];
+}
+
+// Parent-selectie:
+// - super: mag elke parent kiezen (of geen)
+// - reseller: parent binnen eigen boom (inclusief zichzelf)
+// - sub_reseller: parent is zichzelf (voor customers); we tonen dropdown met alleen zichzelf, of verbergen hem.
+function fetch_parent_options(PDO $pdo, array $me, bool $isSuper, bool $isRes, bool $isSubRes): array {
+  if (!column_exists($pdo,'users','parent_user_id')) {
+    // geen hiërarchie → alleen jezelf tonen (praktisch)
+    return [ ['id'=>(int)$me['id'], 'name'=>$me['name'] ?? '—', 'role'=>$me['role'] ?? null] ];
+  }
+
+  if ($isSuper) {
+    $st = $pdo->query("SELECT id,name,role FROM users ORDER BY name");
+    return $st->fetchAll(PDO::FETCH_ASSOC);
+  }
+
+  // reseller/sub: eigen boom
+  $tree = build_tree_ids($pdo, (int)$me['id']);
+  if (!$tree) $tree = [(int)$me['id']];
+  $ph = implode(',', array_fill(0, count($tree), '?'));
+  $st = $pdo->prepare("SELECT id,name,role FROM users WHERE id IN ($ph) ORDER BY name");
+  $st->execute($tree);
+  $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+  // zeker weten dat 'self' erin zit
+  $in = array_map('intval', array_column($rows,'id'));
+  if (!in_array((int)$me['id'], $in, true)) {
+    array_unshift($rows, ['id'=>(int)$me['id'],'name'=>$me['name'] ?? '—','role'=>$me['role'] ?? null]);
+  }
+  return $rows;
+}
+
+$parentOptions = $hasParent ? fetch_parent_options($pdo, $me, $isSuper, $isRes, $isSubRes) : [];
+
+// ----- POST -----
+$errors = [];
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+
+  try { if (function_exists('verify_csrf')) verify_csrf(); }
+  catch (Throwable $e) {
+    $errors[] = 'Sessie verlopen. Probeer opnieuw.';
+  }
+
+  $name     = trim((string)($_POST['name'] ?? ''));
+  $email    = trim((string)($_POST['email'] ?? ''));
+  $password = (string)($_POST['password'] ?? '');
+  $confirm  = (string)($_POST['password_confirm'] ?? '');
+  $roleNew  = trim((string)($_POST['role'] ?? ''));
+  $phone    = trim((string)($_POST['phone'] ?? ''));
+  $isActive = (int)($_POST['is_active'] ?? 1);
+
+  // parent
   $parentId = null;
   if ($hasParent) {
-    if ($isSuper) {
-      $p = (int)($_POST['parent_user_id'] ?? 0);
-      $parentId = $p > 0 ? $p : null;
-    } elseif ($isRes || $isSubRes) {
-      $parentId = (int)$me['id']; // valt onder de aanmaker
+    $parentId = isset($_POST['parent_user_id']) && $_POST['parent_user_id'] !== ''
+      ? (int)$_POST['parent_user_id'] : null;
+
+    if ($isSubRes) {
+      // sub-reseller: forceer parent op zichzelf
+      $parentId = (int)$me['id'];
+    } elseif ($isRes) {
+      // reseller: parent moet in eigen boom liggen (of zichzelf)
+      if ($parentId !== null) {
+        $tree = build_tree_ids($pdo, (int)$me['id']);
+        if (!in_array((int)$parentId, array_map('intval',$tree), true)) {
+          $errors[] = 'Ongeldige ouder (valt niet binnen jouw beheer).';
+        }
+      } else {
+        // geen keuze → zelf
+        $parentId = (int)$me['id'];
+      }
     }
   }
 
-  // Optioneel: status
-  $isActive = $hasIsActive ? (int)($_POST['is_active'] ?? 1) : null;
+  // validatie basis
+  if ($name === '')   $errors[] = 'Naam is verplicht.';
+  if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) $errors[] = 'E-mailadres is ongeldig.';
+  if (!in_array($roleNew, $allowedNewRoles, true)) $errors[] = 'Rol niet toegestaan voor jouw account.';
+  if (strlen($password) < 8) $errors[] = 'Wachtwoord moet minimaal 8 tekens zijn.';
+  if ($password !== $confirm) $errors[] = 'Wachtwoord en bevestiging komen niet overeen.';
 
-  // Dynamische INSERT
-  $fields = [
-    'name'  => $name,
-    'email' => $email,
-  ];
-  if ($hasRole)     $fields['role']      = $newRole;
-  if ($hasIsActive) $fields['is_active'] = $isActive;
-  if ($hasParent && $parentId !== null) $fields['parent_user_id'] = $parentId;
-
-  // Admin adres
-  if ($hasAdminContact)  $fields['admin_contact']  = (string)($_POST['admin_contact']  ?? '');
-  if ($hasAdminAddress)  $fields['admin_address']  = (string)($_POST['admin_address']  ?? '');
-  if ($hasAdminPostcode) $fields['admin_postcode'] = (string)($_POST['admin_postcode'] ?? '');
-  if ($hasAdminCity)     $fields['admin_city']     = (string)($_POST['admin_city']     ?? '');
-
-  // Aansluitadres
-  if ($hasConnContact)   $fields['connect_contact']  = (string)($_POST['connect_contact']  ?? '');
-  if ($hasConnAddress)   $fields['connect_address']  = (string)($_POST['connect_address']  ?? '');
-  if ($hasConnPostcode)  $fields['connect_postcode'] = (string)($_POST['connect_postcode'] ?? '');
-  if ($hasConnCity)      $fields['connect_city']     = (string)($_POST['connect_city']     ?? '');
-
-  // Als password kolommen bestaan, kun je hier desgewenst initiële wachtwoorden zetten.
-  $hasPassHash = column_exists($pdo,'users','password_hash');
-  if ($hasPassHash && !empty($_POST['password'] ?? '')) {
-    $fields['password_hash'] = password_hash((string)$_POST['password'], PASSWORD_DEFAULT);
+  // unieke e-mail?
+  if (!$errors) {
+    $st = $pdo->prepare("SELECT 1 FROM users WHERE email = ? LIMIT 1");
+    $st->execute([$email]);
+    if ($st->fetchColumn()) $errors[] = 'E-mailadres is al in gebruik.';
   }
 
-  // Bouw SQL
-  $cols = array_keys($fields);
-  $placeholders = array_fill(0, count($cols), '?');
-  $values = array_values($fields);
+  // admin adres
+  $admin_contact  = trim((string)($_POST['admin_contact'] ?? ''));
+  $admin_address  = trim((string)($_POST['admin_address'] ?? ''));
+  $admin_postcode = trim((string)($_POST['admin_postcode'] ?? ''));
+  $admin_city     = trim((string)($_POST['admin_city'] ?? ''));
 
-  try {
-    $sql = "INSERT INTO users (`" . implode('`,`', $cols) . "`) VALUES (" . implode(',', $placeholders) . ")";
-    $st  = $pdo->prepare($sql);
-    $st->execute($values);
-    flash_set('success','Gebruiker aangemaakt.');
-    redirect('index.php?route=users_list');
-  } catch (Throwable $e) {
-    flash_set('danger','Opslaan mislukt: ' . $e->getMessage());
-    redirect('index.php?route=user_add');
-  }
-}
+  // aansluit adres
+  $connect_contact  = trim((string)($_POST['connect_contact'] ?? ''));
+  $connect_address  = trim((string)($_POST['connect_address'] ?? ''));
+  $connect_postcode = trim((string)($_POST['connect_postcode'] ?? ''));
+  $connect_city     = trim((string)($_POST['connect_city'] ?? ''));
 
-// Form tonen
-// Rol-opties per aanmaker
-$roleOptions = [];
-if ($hasRole) {
-  if ($isSuper) {
-    $roleOptions = [
-      'super_admin'  => 'Super-admin',
-      'reseller'     => 'Reseller',
-      'sub_reseller' => 'Sub-reseller',
-      'customer'     => 'Eindklant',
-    ];
-  } elseif ($isRes) {
-    $roleOptions = [
-      'sub_reseller' => 'Sub-reseller',
-      'customer'     => 'Eindklant',
-    ];
-  } elseif ($isSubRes) {
-    $roleOptions = [
-      'customer'     => 'Eindklant',
-    ];
+  if (!$errors) {
+    try {
+      // dynamische INSERT op basis van bestaande kolommen
+      $cols = ['name','email','role','password_hash'];
+      $vals = [ $name, $email, $roleNew, password_hash($password, PASSWORD_DEFAULT) ];
+
+      if ($hasPhone && $phone !== '') { $cols[]='phone'; $vals[]=$phone; }
+      if ($hasIsActive) { $cols[]='is_active'; $vals[]=(int)$isActive; }
+      if ($hasParent)   { $cols[]='parent_user_id'; $vals[]=$parentId; }
+
+      // admin adres kolommen
+      if ($hasAdminContact)    { $cols[]='admin_contact';    $vals[]=$admin_contact; }
+      if ($hasAdminAddress)    { $cols[]='admin_address';    $vals[]=$admin_address; }
+      if ($hasAdminPostcode)   { $cols[]='admin_postcode';   $vals[]=$admin_postcode; }
+      if ($hasAdminCity)       { $cols[]='admin_city';       $vals[]=$admin_city; }
+
+      // connect/adres kolommen
+      if ($hasConnectContact)  { $cols[]='connect_contact';  $vals[]=$connect_contact; }
+      if ($hasConnectAddress)  { $cols[]='connect_address';  $vals[]=$connect_address; }
+      if ($hasConnectPostcode) { $cols[]='connect_postcode'; $vals[]=$connect_postcode; }
+      if ($hasConnectCity)     { $cols[]='connect_city';     $vals[]=$connect_city; }
+
+      $ph = implode(',', array_fill(0, count($cols), '?'));
+      $sql = "INSERT INTO users (".implode(',',$cols).") VALUES ({$ph})";
+      $st = $pdo->prepare($sql);
+      $st->execute($vals);
+
+      flash_set('success','Gebruiker aangemaakt.');
+      redirect('index.php?route=users_list');
+    } catch (Throwable $e) {
+      $errors[] = 'Opslaan mislukt: '.$e->getMessage();
+    }
   }
 }
+
+// ----- Form weergave -----
+include __DIR__ . '/../views/header.php';
 ?>
-<div class="d-flex align-items-center justify-content-between mb-3">
-  <h4 class="mb-0">Nieuwe gebruiker</h4>
-  <a class="btn btn-secondary" href="index.php?route=users_list">Terug</a>
-</div>
 
-<form method="post" action="index.php?route=user_add">
+<h4>Nieuwe gebruiker</h4>
+
+<?php if (!empty($errors)): ?>
+  <div class="alert alert-danger">
+    <ul class="mb-0">
+      <?php foreach ($errors as $er): ?>
+        <li><?= e($er) ?></li>
+      <?php endforeach; ?>
+    </ul>
+  </div>
+<?php endif; ?>
+
+<form method="post" action="index.php?route=user_add" class="row g-3">
   <?php if (function_exists('csrf_field')) csrf_field(); ?>
 
-  <div class="row g-3">
-    <div class="col-md-6">
-      <label class="form-label">Naam</label>
-      <input type="text" class="form-control" name="name" required>
+  <div class="col-md-6">
+    <label class="form-label">Naam</label>
+    <input type="text" name="name" class="form-control" required value="<?= e($_POST['name'] ?? '') ?>">
+  </div>
+
+  <div class="col-md-6">
+    <label class="form-label">E-mail</label>
+    <input type="email" name="email" class="form-control" required value="<?= e($_POST['email'] ?? '') ?>">
+  </div>
+
+  <?php if ($hasPhone): ?>
+  <div class="col-md-6">
+    <label class="form-label">Telefoon</label>
+    <input type="text" name="phone" class="form-control" value="<?= e($_POST['phone'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <div class="col-md-3">
+    <label class="form-label">Rol</label>
+    <select name="role" class="form-select" required>
+      <option value="">— kies een rol —</option>
+      <?php foreach ($allowedNewRoles as $r): ?>
+        <option value="<?= e($r) ?>" <?= (($_POST['role'] ?? '')===$r)?'selected':'' ?>><?= e($r) ?></option>
+      <?php endforeach; ?>
+    </select>
+    <div class="form-text">
+      <?php if ($isSuper): ?>
+        Super-admin mag reseller, sub-reseller en klant aanmaken.
+      <?php elseif ($isRes): ?>
+        Reseller mag sub-reseller en klant aanmaken.
+      <?php else: ?>
+        Sub-reseller mag klanten aanmaken.
+      <?php endif; ?>
     </div>
-    <div class="col-md-6">
-      <label class="form-label">E-mail</label>
-      <input type="email" class="form-control" name="email" required>
+  </div>
+
+  <?php if ($hasIsActive): ?>
+  <div class="col-md-3 d-flex align-items-end">
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" name="is_active" value="1" id="is_active"
+        <?= (($_POST['is_active'] ?? '1') === '1') ? 'checked' : '' ?>>
+      <label class="form-check-label" for="is_active">Actief</label>
     </div>
+  </div>
+  <?php endif; ?>
 
-    <?php if ($hasRole && $roleOptions): ?>
-      <div class="col-md-6">
-        <label class="form-label">Rol</label>
-        <select class="form-select" name="role" required>
-          <?php foreach ($roleOptions as $val => $label): ?>
-            <option value="<?= e($val) ?>"><?= e($label) ?></option>
-          <?php endforeach; ?>
-        </select>
-      </div>
-    <?php endif; ?>
-
-    <?php if ($hasIsActive): ?>
-      <div class="col-md-6">
-        <label class="form-label">Status</label>
-        <select class="form-select" name="is_active">
-          <option value="1" selected>Actief</option>
-          <option value="0">Inactief</option>
-        </select>
-      </div>
-    <?php endif; ?>
-
-    <?php if ($isSuper && $hasParent): ?>
-      <div class="col-md-6">
-        <label class="form-label">Parent (optioneel)</label>
-        <select class="form-select" name="parent_user_id">
-          <option value="">— geen —</option>
-          <?php foreach ($parentChoices as $p): ?>
-            <option value="<?= (int)$p['id'] ?>">
-              #<?= (int)$p['id'] ?> — <?= e($p['name']) ?> (<?= e(role_label($p['role'])) ?>)
-            </option>
-          <?php endforeach; ?>
-        </select>
-      </div>
-    <?php endif; ?>
-
-    <?php if (column_exists($pdo,'users','password_hash')): ?>
-      <div class="col-md-6">
-        <label class="form-label">Wachtwoord (optioneel)</label>
-        <input type="password" class="form-control" name="password" autocomplete="new-password">
-      </div>
+  <?php if ($hasParent): ?>
+  <div class="col-12">
+    <label class="form-label">Hoort onder (parent)</label>
+    <select name="parent_user_id" class="form-select" <?= $isSubRes ? 'disabled' : '' ?>>
+      <?php if (!$isSubRes): ?>
+        <option value="">— kies ouder —</option>
+      <?php endif; ?>
+      <?php foreach ($parentOptions as $po): ?>
+        <?php
+          $pid = (int)($po['id'] ?? 0);
+          $label = '#'.$pid.' — '.($po['name'] ?? '—').(!empty($po['role']) ? ' ('.$po['role'].')' : '');
+          $selected = ((string)($pid) === (string)($_POST['parent_user_id'] ?? '')) ? 'selected' : '';
+          // sub-reseller: forceer parent op zichzelf
+          if ($isSubRes && $pid !== (int)$me['id']) continue;
+        ?>
+        <option value="<?= $pid ?>" <?= $selected ?>><?= e($label) ?></option>
+      <?php endforeach; ?>
+    </select>
+    <?php if ($isSubRes): ?>
+      <!-- Als disabled, toch waarde meesturen -->
+      <input type="hidden" name="parent_user_id" value="<?= (int)$me['id'] ?>">
     <?php endif; ?>
   </div>
+  <?php endif; ?>
 
-  <hr class="my-4">
-  <h5>Administratief adres</h5>
-  <div class="row g-3">
-    <?php if ($hasAdminContact): ?>
-      <div class="col-md-6">
-        <label class="form-label">Contactpersoon</label>
-        <input type="text" class="form-control" name="admin_contact">
-      </div>
-    <?php endif; ?>
-    <?php if ($hasAdminAddress): ?>
-      <div class="col-md-6">
-        <label class="form-label">Adres</label>
-        <input type="text" class="form-control" name="admin_address">
-      </div>
-    <?php endif; ?>
-    <?php if ($hasAdminPostcode): ?>
-      <div class="col-md-3">
-        <label class="form-label">Postcode</label>
-        <input type="text" class="form-control" name="admin_postcode">
-      </div>
-    <?php endif; ?>
-    <?php if ($hasAdminCity): ?>
-      <div class="col-md-5">
-        <label class="form-label">Woonplaats</label>
-        <input type="text" class="form-control" name="admin_city">
-      </div>
-    <?php endif; ?>
+  <div class="col-md-6">
+    <label class="form-label">Wachtwoord</label>
+    <input type="password" name="password" class="form-control" required>
   </div>
 
-  <hr class="my-4">
-  <h5>Aansluitadres</h5>
-  <div class="row g-3">
-    <?php if ($hasConnContact): ?>
-      <div class="col-md-6">
-        <label class="form-label">Contactpersoon</label>
-        <input type="text" class="form-control" name="connect_contact">
-      </div>
-    <?php endif; ?>
-    <?php if ($hasConnAddress): ?>
-      <div class="col-md-6">
-        <label class="form-label">Adres</label>
-        <input type="text" class="form-control" name="connect_address">
-      </div>
-    <?php endif; ?>
-    <?php if ($hasConnPostcode): ?>
-      <div class="col-md-3">
-        <label class="form-label">Postcode</label>
-        <input type="text" class="form-control" name="connect_postcode">
-      </div>
-    <?php endif; ?>
-    <?php if ($hasConnCity): ?>
-      <div class="col-md-5">
-        <label class="form-label">Woonplaats</label>
-        <input type="text" class="form-control" name="connect_city">
-      </div>
-    <?php endif; ?>
+  <div class="col-md-6">
+    <label class="form-label">Bevestig wachtwoord</label>
+    <input type="password" name="password_confirm" class="form-control" required>
   </div>
 
-  <div class="mt-4 d-flex gap-2">
-    <button class="btn btn-primary" type="submit">Aanmaken</button>
-    <a class="btn btn-outline-secondary" href="index.php?route=users_list">Annuleren</a>
+  <!-- Administratief adres -->
+  <div class="col-12"><hr></div>
+  <div class="col-12"><h5>Administratief adres</h5></div>
+
+  <?php if ($hasAdminContact): ?>
+  <div class="col-md-6">
+    <label class="form-label">Contactpersoon</label>
+    <input type="text" name="admin_contact" class="form-control" value="<?= e($_POST['admin_contact'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <?php if ($hasAdminAddress): ?>
+  <div class="col-md-6">
+    <label class="form-label">Adres</label>
+    <input type="text" name="admin_address" class="form-control" value="<?= e($_POST['admin_address'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <?php if ($hasAdminPostcode): ?>
+  <div class="col-md-4">
+    <label class="form-label">Postcode</label>
+    <input type="text" name="admin_postcode" class="form-control" value="<?= e($_POST['admin_postcode'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <?php if ($hasAdminCity): ?>
+  <div class="col-md-8">
+    <label class="form-label">Woonplaats</label>
+    <input type="text" name="admin_city" class="form-control" value="<?= e($_POST['admin_city'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <!-- Aansluitadres -->
+  <div class="col-12"><hr></div>
+  <div class="col-12"><h5>Aansluitadres</h5></div>
+
+  <?php if ($hasConnectContact): ?>
+  <div class="col-md-6">
+    <label class="form-label">Contactpersoon</label>
+    <input type="text" name="connect_contact" class="form-control" value="<?= e($_POST['connect_contact'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <?php if ($hasConnectAddress): ?>
+  <div class="col-md-6">
+    <label class="form-label">Adres</label>
+    <input type="text" name="connect_address" class="form-control" value="<?= e($_POST['connect_address'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <?php if ($hasConnectPostcode): ?>
+  <div class="col-md-4">
+    <label class="form-label">Postcode</label>
+    <input type="text" name="connect_postcode" class="form-control" value="<?= e($_POST['connect_postcode'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <?php if ($hasConnectCity): ?>
+  <div class="col-md-8">
+    <label class="form-label">Woonplaats</label>
+    <input type="text" name="connect_city" class="form-control" value="<?= e($_POST['connect_city'] ?? '') ?>">
+  </div>
+  <?php endif; ?>
+
+  <div class="col-12 d-flex gap-2">
+    <button class="btn btn-primary">Aanmaken</button>
+    <a href="index.php?route=users_list" class="btn btn-outline-secondary">Annuleren</a>
   </div>
 </form>
+
+<?php include __DIR__ . '/../views/footer.php'; ?>
