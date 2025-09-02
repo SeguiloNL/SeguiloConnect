@@ -41,6 +41,48 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
   }
   return $ids;
 }
+/** Geef lijst met doelgebruikers (reseller, sub_reseller, customer) binnen scope. */
+function fetch_assignable_users(PDO $pdo, array $me, bool $isSuper, bool $isRes, bool $isSubRes): array {
+  $hasRole = column_exists($pdo,'users','role');
+  $hasParent = column_exists($pdo,'users','parent_user_id');
+  // Rollen die we toestaan als doel
+  $allowedRoles = ['reseller','sub_reseller','customer'];
+
+  if ($isSuper) {
+    if ($hasRole) {
+      $ph = implode(',', array_fill(0, count($allowedRoles), '?'));
+      $st = $pdo->prepare("SELECT id,name,role FROM users WHERE role IN ($ph) ORDER BY name");
+      $st->execute($allowedRoles);
+      return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+    // fallback: geen role kolom → toon iedereen behalve super_admin zelf
+    return $pdo->query("SELECT id,name,NULL AS role FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+  }
+
+  // Reseller/Sub-reseller → alleen binnen eigen boom
+  $tree = $hasParent ? build_tree_ids($pdo, (int)$me['id']) : [(int)$me['id']];
+  $phTree = implode(',', array_fill(0, count($tree), '?'));
+
+  if ($hasRole) {
+    $phRoles = implode(',', array_fill(0, count($allowedRoles), '?'));
+    $sql = "SELECT id,name,role FROM users 
+            WHERE id IN ($phTree) AND role IN ($phRoles)
+            ORDER BY name";
+    $st = $pdo->prepare($sql);
+    $st->execute(array_merge($tree, $allowedRoles));
+  } else {
+    $st = $pdo->prepare("SELECT id,name,NULL AS role FROM users WHERE id IN ($phTree) ORDER BY name");
+    $st->execute($tree);
+  }
+  $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+  // plus: jezelf als doel (handig voor eigen voorraad), tenzij je super bent
+  $self = ['id'=>(int)$me['id'], 'name'=>$me['name'] ?? '—', 'role'=>$me['role'] ?? null];
+  $in = array_map('intval', array_column($rows,'id'));
+  if (!in_array($self['id'], $in, true)) array_unshift($rows, $self);
+
+  return $rows;
+}
 
 // ---------- paginering ----------
 $perPage = 100;
@@ -93,8 +135,10 @@ try {
   return;
 }
 
-// ---------- UI ----------
+// ---------- doelgebruikers dropdown ----------
+$assignableUsers = $isMgr ? fetch_assignable_users($pdo, $me, $isSuper, $isRes, $isSubRes) : [];
 ?>
+
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
   <h4 class="mb-0">Simkaarten</h4>
   <?php if ($isSuper): ?>
@@ -110,12 +154,20 @@ try {
   <form method="post" action="index.php?route=sim_bulk_action" id="bulkForm">
     <?php if (function_exists('csrf_field')) csrf_field(); ?>
 
-    <!-- Bulk-acties -->
     <?php if ($isMgr): ?>
+      <!-- Bulk-assign: kies doelgebruiker -->
       <div class="row g-3 align-items-end mb-3">
-        <div class="col-12 col-md-auto">
-          <label class="form-label mb-1">Toewijzen aan (user ID)</label>
-          <input type="number" class="form-control" name="target_user_id" placeholder="Bijv. 42">
+        <div class="col-12 col-md-6">
+          <label class="form-label mb-1">Toewijzen aan</label>
+          <select class="form-select" name="target_user_id" id="bulkTarget">
+            <option value="">— kies gebruiker —</option>
+            <?php foreach ($assignableUsers as $u): ?>
+              <option value="<?= (int)$u['id'] ?>">
+                #<?= (int)$u['id'] ?> — <?= e($u['name']) ?><?php if (!empty($u['role'])): ?> (<?= e($u['role']) ?>)<?php endif; ?>
+              </option>
+            <?php endforeach; ?>
+          </select>
+          <div class="form-text">Resellers/sub-resellers zien alleen gebruikers binnen eigen beheer.</div>
         </div>
         <div class="col-12 col-md-auto">
           <div class="btn-group" role="group">
@@ -144,14 +196,14 @@ try {
             <th>PUK</th>
             <th>Status</th>
             <th>Toegewezen aan</th>
-            <th style="width:260px;">Acties</th>
+            <th style="width:340px;">Acties</th>
           </tr>
         </thead>
         <tbody>
-        <?php foreach ($rows as $r): ?>
+        <?php foreach ($rows as $r): $sid=(int)$r['id']; ?>
           <tr>
-            <td><input type="checkbox" name="ids[]" value="<?= (int)$r['id'] ?>"></td>
-            <td><?= (int)$r['id'] ?></td>
+            <td><input type="checkbox" name="ids[]" value="<?= $sid ?>"></td>
+            <td><?= $sid ?></td>
             <td><?= e($r['iccid'] ?? '') ?></td>
             <td><?= e($r['imsi'] ?? '') ?></td>
             <td><?= e($r['pin'] ?? '') ?></td>
@@ -169,18 +221,35 @@ try {
               ?>
             </td>
             <td>
-              <div class="btn-group btn-group-sm" role="group">
-                <?php if ($isSuper): ?>
-                  <a class="btn btn-outline-secondary" href="index.php?route=sim_edit&id=<?= (int)$r['id'] ?>">Bewerken</a>
-                  <form method="post" action="index.php?route=sim_delete" onsubmit="return confirm('Weet je zeker dat je deze simkaart wil verwijderen?');" class="d-inline">
-                    <?php if (function_exists('csrf_field')) csrf_field(); ?>
-                    <input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
-                    <button class="btn btn-outline-danger">Verwijderen</button>
-                  </form>
-                <?php endif; ?>
+              <div class="d-flex flex-wrap gap-2 align-items-center">
                 <?php if ($isMgr): ?>
-                  <a class="btn btn-outline-primary" href="index.php?route=sim_assign&sim_id=<?= (int)$r['id'] ?>">Toewijzen</a>
+                  <!-- Toewijzen per rij -->
+                  <div class="input-group input-group-sm" style="max-width: 360px;">
+                    <select class="form-select" id="rowTarget-<?= $sid ?>">
+                      <option value="">— kies gebruiker —</option>
+                      <?php foreach ($assignableUsers as $u): ?>
+                        <option value="<?= (int)$u['id'] ?>">
+                          #<?= (int)$u['id'] ?> — <?= e($u['name']) ?><?php if (!empty($u['role'])): ?> (<?= e($u['role']) ?>)<?php endif; ?>
+                        </option>
+                      <?php endforeach; ?>
+                    </select>
+                    <button class="btn btn-outline-primary" type="button"
+                      onclick="assignSingle(<?= $sid ?>)">Toewijzen</button>
+                    <button class="btn btn-outline-secondary" type="button"
+                      onclick="unassignSingle(<?= $sid ?>)">Naar voorraad</button>
+                  </div>
                 <?php endif; ?>
+
+                <div class="btn-group btn-group-sm" role="group">
+                  <?php if ($isSuper): ?>
+                    <a class="btn btn-outline-secondary" href="index.php?route=sim_edit&id=<?= $sid ?>">Bewerken</a>
+                    <form method="post" action="index.php?route=sim_delete" onsubmit="return confirm('Weet je zeker dat je deze simkaart wil verwijderen?');" class="d-inline">
+                      <?php if (function_exists('csrf_field')) csrf_field(); ?>
+                      <input type="hidden" name="id" value="<?= $sid ?>">
+                      <button class="btn btn-outline-danger">Verwijderen</button>
+                    </form>
+                  <?php endif; ?>
+                </div>
               </div>
             </td>
           </tr>
@@ -194,7 +263,6 @@ try {
       <nav aria-label="Paginering">
         <ul class="pagination mt-3">
           <?php
-            // eenvoudige window
             $window = 2;
             $start  = max(1, $page - $window);
             $end    = min($totalPages, $page + $window);
@@ -206,7 +274,6 @@ try {
               $href = 'index.php?route=sims_list&page='.$p;
               return '<li class="'.$cls.'"><a class="page-link" href="'.$href.'">'.$label.'</a></li>';
             };
-
             echo $mk(max(1,$page-1), '‹', $page<=1);
             if ($start > 1) {
               echo $mk(1, '1', false, $page===1);
@@ -223,20 +290,9 @@ try {
       </nav>
     <?php endif; ?>
 
-    <!-- Bulk actie bevestiging onderaan (optioneel extra knoppen) -->
-    <?php if ($isMgr): ?>
-      <div class="mt-3 d-flex flex-wrap gap-2">
-        <button type="submit" name="action" value="assign"   class="btn btn-primary">Bulk toewijzen</button>
-        <button type="submit" name="action" value="unassign" class="btn btn-outline-secondary">Bulk naar voorraad</button>
-        <?php if ($isSuper): ?>
-          <button type="submit" name="action" value="delete" class="btn btn-danger"
-            onclick="return confirm('Weet je zeker dat je de geselecteerde simkaarten wil verwijderen?');">
-            Verwijder geselecteerde
-          </button>
-        <?php endif; ?>
-      </div>
-    <?php endif; ?>
-
+    <!-- Hidden inputs voor single-row acties -->
+    <input type="hidden" name="action" id="bulkAction" value="">
+    <input type="hidden" name="single_id" id="singleId" value="">
   </form>
 <?php endif; ?>
 
@@ -245,4 +301,57 @@ try {
 document.getElementById('selectAll')?.addEventListener('change', function(e) {
   document.querySelectorAll('input[name="ids[]"]').forEach(cb => cb.checked = e.target.checked);
 });
+
+// Single-row assign/unassign via bulk endpoint
+function assignSingle(simId) {
+  const sel = document.getElementById('rowTarget-' + simId);
+  const val = sel ? sel.value : '';
+  if (!val) {
+    alert('Kies eerst een doelgebruiker in de dropdown.');
+    return;
+  }
+  // maak selectie leeg en voeg enkel deze ID toe
+  document.querySelectorAll('input[name="ids[]"]').forEach(cb => cb.checked = false);
+  addSingleId(simId);
+  setActionAndTarget('assign', val);
+  document.getElementById('bulkForm').submit();
+}
+function unassignSingle(simId) {
+  document.querySelectorAll('input[name="ids[]"]').forEach(cb => cb.checked = false);
+  addSingleId(simId);
+  setActionAndTarget('unassign', '');
+  document.getElementById('bulkForm').submit();
+}
+function addSingleId(simId) {
+  // check of er al een checkbox voor deze sim bestaat; zo niet, maak er snel een bij
+  let cb = Array.from(document.querySelectorAll('input[name="ids[]"]')).find(c => parseInt(c.value,10) === simId);
+  if (!cb) {
+    cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.name = 'ids[]';
+    cb.value = String(simId);
+    cb.checked = true;
+    cb.hidden = true;
+    document.getElementById('bulkForm').appendChild(cb);
+  } else {
+    cb.checked = true;
+  }
+}
+function setActionAndTarget(action, targetUserId) {
+  document.getElementById('bulkAction').value = action;
+  // zet (of maak) een target_user_id input voor single-row assign
+  let t = document.querySelector('select[name="target_user_id"]');
+  if (!t) {
+    // maak tijdelijk een select/input als die ontbreekt (zou er zijn boven de tabel)
+    t = document.createElement('input');
+    t.type = 'hidden';
+    t.name = 'target_user_id';
+    document.getElementById('bulkForm').appendChild(t);
+  }
+  if (t.tagName.toLowerCase() === 'select') {
+    if (targetUserId) t.value = targetUserId;
+  } else {
+    t.value = targetUserId || '';
+  }
+}
 </script>
