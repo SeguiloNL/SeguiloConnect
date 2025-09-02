@@ -74,7 +74,7 @@ $hasStatusCol   = column_exists($pdo,'sims','status');
 $ordersHasSim   = table_exists($pdo,'orders') && column_exists($pdo,'orders','sim_id');
 
 // --- input ---
-$action = trim((string)($_POST['action'] ?? ''));
+$action = trim((string)($_POST['action'] ?? $_POST['do_action'] ?? '')); // tolerant
 $ids    = $_POST['ids'] ?? [];
 if (!is_array($ids)) $ids = [];
 $ids = array_values(array_unique(array_map('intval', $ids)));
@@ -222,11 +222,8 @@ try {
   flash_set('danger','Actie mislukt: ' . $e->getMessage());
 }
 
-// Terug naar lijst (behoud query string indien gewenst)
+// Terug naar waar je vandaan kwam (behoud page/status)
 $redirect = 'index.php?route=sims_list';
-$qs = $_SERVER['HTTP_REFERER'] ?? '';
-if ($qs && str_contains($qs, 'route=sims_list')) {
-  // ga terug naar de pagina waar je was (met page/status)
-  $redirect = $qs;
-}
+$ref = $_SERVER['HTTP_REFERER'] ?? '';
+if ($ref && str_contains($ref, 'route=sims_list')) $redirect = $ref;
 redirect($redirect);

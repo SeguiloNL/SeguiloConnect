@@ -55,7 +55,6 @@ function fetch_assignable_users(PDO $pdo, array $me, bool $isSuper, bool $isRes,
       $st->execute($allowedRoles);
       return $st->fetchAll(PDO::FETCH_ASSOC);
     }
-    // fallback: geen role kolom → toon iedereen behalve super_admin zelf
     return $pdo->query("SELECT id,name,NULL AS role FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
   }
 
@@ -76,7 +75,7 @@ function fetch_assignable_users(PDO $pdo, array $me, bool $isSuper, bool $isRes,
   }
   $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 
-  // plus: jezelf als doel (handig voor eigen voorraad), tenzij je super bent
+  // plus: jezelf als doel (handig voor eigen voorraad)
   $self = ['id'=>(int)$me['id'], 'name'=>$me['name'] ?? '—', 'role'=>$me['role'] ?? null];
   $in = array_map('intval', array_column($rows,'id'));
   if (!in_array($self['id'], $in, true)) array_unshift($rows, $self);
@@ -259,6 +258,9 @@ $assignableUsers = $isMgr ? fetch_assignable_users($pdo, $me, $isSuper, $isRes, 
     </div>
 
     <!-- Paginering -->
+    <?php
+      $queryBase = 'index.php?route=sims_list';
+    ?>
     <?php if ($totalPages > 1): ?>
       <nav aria-label="Paginering">
         <ul class="pagination mt-3">
@@ -266,12 +268,12 @@ $assignableUsers = $isMgr ? fetch_assignable_users($pdo, $me, $isSuper, $isRes, 
             $window = 2;
             $start  = max(1, $page - $window);
             $end    = min($totalPages, $page + $window);
-            $mk = function(int $p, string $label = null, bool $disabled=false, bool $active=false) {
+            $mk = function(int $p, string $label = null, bool $disabled=false, bool $active=false) use ($queryBase) {
               $label = $label ?? (string)$p;
               $cls = 'page-item';
               if ($disabled) $cls .= ' disabled';
               if ($active)   $cls .= ' active';
-              $href = 'index.php?route=sims_list&page='.$p;
+              $href = $queryBase.'&page='.$p;
               return '<li class="'.$cls.'"><a class="page-link" href="'.$href.'">'.$label.'</a></li>';
             };
             echo $mk(max(1,$page-1), '‹', $page<=1);
@@ -290,8 +292,8 @@ $assignableUsers = $isMgr ? fetch_assignable_users($pdo, $me, $isSuper, $isRes, 
       </nav>
     <?php endif; ?>
 
-    <!-- Hidden inputs voor single-row acties -->
-    <input type="hidden" name="action" id="bulkAction" value="">
+    <!-- Verborgen inputs voor single-row acties -->
+    <input type="hidden" name="do_action" id="bulkAction" value="">
     <input type="hidden" name="single_id" id="singleId" value="">
   </form>
 <?php endif; ?>
@@ -323,7 +325,6 @@ function unassignSingle(simId) {
   document.getElementById('bulkForm').submit();
 }
 function addSingleId(simId) {
-  // check of er al een checkbox voor deze sim bestaat; zo niet, maak er snel een bij
   let cb = Array.from(document.querySelectorAll('input[name="ids[]"]')).find(c => parseInt(c.value,10) === simId);
   if (!cb) {
     cb = document.createElement('input');
@@ -338,11 +339,10 @@ function addSingleId(simId) {
   }
 }
 function setActionAndTarget(action, targetUserId) {
-  document.getElementById('bulkAction').value = action;
+  document.getElementById('bulkAction').value = action; // let op: do_action
   // zet (of maak) een target_user_id input voor single-row assign
   let t = document.querySelector('select[name="target_user_id"]');
   if (!t) {
-    // maak tijdelijk een select/input als die ontbreekt (zou er zijn boven de tabel)
     t = document.createElement('input');
     t.type = 'hidden';
     t.name = 'target_user_id';
