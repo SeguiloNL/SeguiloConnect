@@ -1,5 +1,5 @@
 <?php
-// pages/sims_list.php — compacte, robuuste lijst met per-rij acties
+// pages/users_list.php
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -23,7 +23,7 @@ function column_exists(PDO $pdo, string $table, string $col): bool {
   return $st ? (bool)$st->fetch(PDO::FETCH_ASSOC) : false;
 }
 function build_tree_ids(PDO $pdo, int $rootId): array {
-  if (!column_exists($pdo, 'users', 'parent_user_id')) return [$rootId];
+  if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
   $ids = [$rootId]; $queue = [$rootId]; $seen = [$rootId=>true];
   while ($queue) {
     $chunk = array_splice($queue, 0, 200);
@@ -37,68 +37,60 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
   }
   return $ids;
 }
-function fetch_assignable_users(PDO $pdo, array $me, bool $isSuper, bool $isRes, bool $isSubRes): array {
-  $hasRole   = column_exists($pdo,'users','role');
-  $hasParent = column_exists($pdo,'users','parent_user_id');
-  $allowed   = ['reseller','sub_reseller','customer'];
 
-  if ($isSuper) {
-    if ($hasRole) {
-      $ph = implode(',', array_fill(0, count($allowed), '?'));
-      $st = $pdo->prepare("SELECT id,name,role FROM users WHERE role IN ($ph) ORDER BY name");
-      $st->execute($allowed);
-      return $st->fetchAll(PDO::FETCH_ASSOC);
-    }
-    return $pdo->query("SELECT id,name,NULL AS role FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
-  }
+// ---------- filters ----------
+$paramRole     = trim((string)($_GET['role'] ?? ''));
+$paramIsActive = trim((string)($_GET['is_active'] ?? ''));
+$q             = trim((string)($_GET['q'] ?? ''));
 
-  $tree = $hasParent ? build_tree_ids($pdo, (int)$me['id']) : [(int)$me['id']];
-  $phTree = implode(',', array_fill(0, count($tree), '?'));
-
-  if ($hasRole) {
-    $phRoles = implode(',', array_fill(0, count($allowed), '?'));
-    $sql = "SELECT id,name,role FROM users WHERE id IN ($phTree) AND role IN ($phRoles) ORDER BY name";
-    $st  = $pdo->prepare($sql);
-    $st->execute(array_merge($tree, $allowed));
-  } else {
-    $st = $pdo->prepare("SELECT id,name,NULL AS role FROM users WHERE id IN ($phTree) ORDER BY name");
-    $st->execute($tree);
-  }
-  $rows = $st->fetchAll(PDO::FETCH_ASSOC);
-
-  // voeg jezelf als optie toe (voor eigen voorraad), indien niet aanwezig
-  $self = ['id'=>(int)$me['id'], 'name'=>$me['name'] ?? '—', 'role'=>$me['role'] ?? null];
-  $in = array_map('intval', array_column($rows,'id'));
-  if (!in_array($self['id'], $in, true)) array_unshift($rows, $self);
-
-  return $rows;
-}
+$allowedRoles = ['super_admin','reseller','sub_reseller','customer'];
 
 // ---------- paginering ----------
 $perPage = 100;
 $page    = max(1, (int)($_GET['page'] ?? 1));
 $offset  = ($page - 1) * $perPage;
 
-// ---------- scope ----------
-$scopeWhere = '';
-$scopeArgs  = [];
-$hasAssigned = column_exists($pdo,'sims','assigned_to_user_id');
+// ---------- WHERE + scope ----------
+$where = [];
+$args  = [];
 
-if (!$isSuper && $hasAssigned) {
+// scope: super → geen beperking; reseller/sub → eigen boom
+$scopeSql = '';
+$scopeArgs = [];
+if (!$isSuper) {
   $tree = build_tree_ids($pdo, (int)$me['id']);
   if ($tree) {
     $ph = implode(',', array_fill(0, count($tree), '?'));
-    // reseller/sub: alleen eigen boom of voorraad (NULL)
-    $scopeWhere = " WHERE (s.assigned_to_user_id IS NULL OR s.assigned_to_user_id IN ($ph))";
-    $scopeArgs  = $tree;
+    $scopeSql = "u.id IN ($ph)";
+    $scopeArgs = $tree;
+    $where[] = $scopeSql;
   }
 }
 
-// ---------- total count ----------
+// filters
+if ($paramRole !== '' && in_array($paramRole, $allowedRoles, true)) {
+  $where[] = "u.role = ?";
+  $args[]  = $paramRole;
+}
+if ($paramIsActive !== '') {
+  if ($paramIsActive === '1' || $paramIsActive === '0') {
+    $where[] = "u.is_active = ?";
+    $args[]  = (int)$paramIsActive;
+  }
+}
+if ($q !== '') {
+  $where[] = "(u.name LIKE ? OR u.email LIKE ?)";
+  $args[] = '%'.$q.'%';
+  $args[] = '%'.$q.'%';
+}
+
+$whereSql = $where ? ('WHERE '.implode(' AND ', $where)) : '';
+
+// ---------- total ----------
 try {
-  $sqlCnt = "SELECT COUNT(*) FROM sims s{$scopeWhere}";
+  $sqlCnt = "SELECT COUNT(*) FROM users u {$whereSql}";
   $stCnt = $pdo->prepare($sqlCnt);
-  $stCnt->execute($scopeArgs);
+  $stCnt->execute(array_merge($scopeArgs, $args));
   $total = (int)$stCnt->fetchColumn();
 } catch (Throwable $e) {
   echo '<div class="alert alert-danger">Tellen mislukt: '.e($e->getMessage()).'</div>';
@@ -109,110 +101,133 @@ if ($page > $totalPages) { $page = $totalPages; $offset = ($page - 1) * $perPage
 
 // ---------- data ----------
 try {
-  $sql = "SELECT s.*,
-                 u.id   AS assigned_to_user_id,
-                 u.name AS assigned_name
-          FROM sims s
-          LEFT JOIN users u ON u.id = s.assigned_to_user_id
-          {$scopeWhere}
-          ORDER BY s.id DESC
+  $sql = "SELECT u.id, u.name, u.email, u.role, u.is_active, u.parent_user_id
+          FROM users u
+          {$whereSql}
+          ORDER BY u.id DESC
           LIMIT {$perPage} OFFSET {$offset}";
   $st = $pdo->prepare($sql);
-  $st->execute($scopeArgs);
+  $st->execute(array_merge($scopeArgs, $args));
   $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
-  echo '<div class="alert alert-danger">Laden mislukt: '.e($e->getMessage()).'</div>';
+  echo '<div class="alert alert-danger">Gebruikers laden mislukt: '.e($e->getMessage()).'</div>';
   return;
 }
 
-// ---------- doelgebruikers voor toewijzen ----------
-$assignableUsers = $isMgr ? fetch_assignable_users($pdo, $me, $isSuper, $isRes, $isSubRes) : [];
+// Mapping parent names voor weergave
+$parentNames = [];
+if ($rows) {
+  $parentIds = array_unique(array_filter(array_map('intval', array_column($rows,'parent_user_id'))));
+  if ($parentIds) {
+    $ph = implode(',', array_fill(0, count($parentIds), '?'));
+    $stp = $pdo->prepare("SELECT id,name FROM users WHERE id IN ($ph)");
+    $stp->execute($parentIds);
+    $parentNames = $stp->fetchAll(PDO::FETCH_KEY_PAIR); // [id => name]
+  }
+}
 ?>
 
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-  <h4 class="mb-0">Simkaarten</h4>
-  <?php if ($isSuper): ?>
-    <a class="btn btn-primary" href="index.php?route=sim_add">Nieuwe simkaart toevoegen</a>
+  <h4 class="mb-0">Gebruikers</h4>
+  <?php if ($isMgr): ?>
+    <a class="btn btn-primary" href="index.php?route=user_add">Nieuwe gebruiker</a>
   <?php endif; ?>
 </div>
 
 <?= function_exists('flash_output') ? flash_output() : '' ?>
 
+<!-- Filters -->
+<form class="row g-2 mb-3" method="get" action="index.php">
+  <input type="hidden" name="route" value="users_list">
+  <div class="col-12 col-md-3">
+    <label class="form-label mb-1">Rol</label>
+    <select class="form-select" name="role">
+      <option value="">— alle rollen —</option>
+      <?php foreach ($allowedRoles as $r): ?>
+        <option value="<?= e($r) ?>" <?= $paramRole===$r ? 'selected' : '' ?>>
+          <?= e($r) ?>
+        </option>
+      <?php endforeach; ?>
+    </select>
+  </div>
+  <div class="col-12 col-md-3">
+    <label class="form-label mb-1">Actief</label>
+    <select class="form-select" name="is_active">
+      <option value="">— alle —</option>
+      <option value="1" <?= $paramIsActive==='1' ? 'selected' : '' ?>>Actief</option>
+      <option value="0" <?= $paramIsActive==='0' ? 'selected' : '' ?>>Inactief</option>
+    </select>
+  </div>
+  <div class="col-12 col-md-4">
+    <label class="form-label mb-1">Zoek</label>
+    <input class="form-control" type="text" name="q" value="<?= e($q) ?>" placeholder="Naam of e-mail">
+  </div>
+  <div class="col-12 col-md-2 d-flex align-items-end">
+    <button class="btn btn-outline-secondary w-100">Filter</button>
+  </div>
+</form>
+
 <?php if (!$rows): ?>
-  <div class="alert alert-info">Geen simkaarten gevonden.</div>
+  <div class="alert alert-info">Geen gebruikers gevonden.</div>
 <?php else: ?>
   <div class="table-responsive">
     <table class="table table-sm align-middle">
       <thead>
         <tr>
-          <th style="width:70px;">ID</th>
-          <th>ICCID</th>
-          <th>IMSI</th>
-          <th>PIN</th>
-          <th>PUK</th>
-          <th>Status</th>
-          <th>Toegewezen aan</th>
-          <th style="width:420px;">Acties</th>
+          <th style="width:80px;">ID</th>
+          <th>Naam</th>
+          <th>E-mail</th>
+          <th>Rol</th>
+          <th>Actief</th>
+          <th>Parent</th>
+          <th style="width:320px;">Acties</th>
         </tr>
       </thead>
       <tbody>
-      <?php foreach ($rows as $r): $sid=(int)$r['id']; ?>
+      <?php foreach ($rows as $u): ?>
+        <?php
+          $uid   = (int)$u['id'];
+          $inTree = true;
+          if (!$isSuper) {
+            // Als we hier komen, is al via WHERE gescope’d; extra check is defensief:
+            $inTree = true;
+          }
+          $canEdit = $isSuper || $inTree;
+          // Verwijderen alleen super; (wil je reseller ook laten verwijderen binnen scope, zet $canDelete = $isSuper || $inTree;)
+          $canDelete = $isSuper;
+          $canImpersonate = $isSuper || ($inTree && $uid !== (int)$me['id']);
+        ?>
         <tr>
-          <td><?= $sid ?></td>
-          <td><?= e($r['iccid'] ?? '') ?></td>
-          <td><?= e($r['imsi'] ?? '') ?></td>
-          <td><?= e($r['pin'] ?? '') ?></td>
-          <td><?= e($r['puk'] ?? '') ?></td>
-          <td><?= e($r['status'] ?? '') ?></td>
+          <td><?= $uid ?></td>
+          <td><?= e($u['name'] ?? '') ?></td>
+          <td><?= e($u['email'] ?? '') ?></td>
+          <td><?= e($u['role'] ?? '') ?></td>
+          <td><?= ((int)($u['is_active'] ?? 0) === 1) ? 'Ja' : 'Nee' ?></td>
           <td>
             <?php
-              $uid   = $r['assigned_to_user_id'] ?? null;
-              $uname = $r['assigned_name'] ?? '';
-              echo $uid ? e('#'.$uid.' — '.($uname !== '' ? $uname : '(naam onbekend)'))
-                        : '<span class="text-muted">—</span>';
+              $pid = (int)($u['parent_user_id'] ?? 0);
+              echo $pid ? e("#$pid — ".($parentNames[$pid] ?? 'onbekend')) : '<span class="text-muted">—</span>';
             ?>
           </td>
           <td>
             <div class="d-flex flex-wrap gap-2">
-              <?php if ($isMgr): ?>
-                <!-- Toewijzen (per rij) -->
-                <form method="post" action="index.php?route=sim_bulk_action" class="d-flex flex-wrap gap-2 align-items-center">
-                  <?php if (function_exists('csrf_field')) csrf_field(); ?>
-                  <input type="hidden" name="ids[]" value="<?= $sid ?>">
-                  <input type="hidden" name="do_action" value="assign">
-                  <div class="input-group input-group-sm" style="max-width: 340px;">
-                    <select class="form-select" name="target_user_id" required>
-                      <option value="">— kies gebruiker —</option>
-                      <?php foreach ($assignableUsers as $u): ?>
-                        <option value="<?= (int)$u['id'] ?>">
-                          #<?= (int)$u['id'] ?> — <?= e($u['name']) ?><?php if (!empty($u['role'])): ?> (<?= e($u['role']) ?>)<?php endif; ?>
-                        </option>
-                      <?php endforeach; ?>
-                    </select>
-                    <button class="btn btn-outline-primary" type="submit">Toewijzen</button>
-                  </div>
-                </form>
+              <?php if ($canEdit): ?>
+                <a class="btn btn-outline-secondary btn-sm" href="index.php?route=user_edit&id=<?= $uid ?>">Bewerken</a>
+              <?php endif; ?>
 
-                <!-- Naar voorraad (per rij) -->
-                <form method="post" action="index.php?route=sim_bulk_action" class="d-inline">
+              <?php if ($canImpersonate): ?>
+                <form method="post" action="index.php?route=impersonate_start" class="d-inline">
                   <?php if (function_exists('csrf_field')) csrf_field(); ?>
-                  <input type="hidden" name="ids[]" value="<?= $sid ?>">
-                  <input type="hidden" name="do_action" value="unassign">
-                  <button class="btn btn-outline-secondary btn-sm" type="submit">Naar voorraad</button>
+                  <input type="hidden" name="user_id" value="<?= $uid ?>">
+                  <button class="btn btn-outline-primary btn-sm" type="submit">Inloggen als</button>
                 </form>
               <?php endif; ?>
 
-              <!-- Bewerken -->
-              <?php if ($isSuper): ?>
-                <a class="btn btn-outline-secondary btn-sm" href="index.php?route=sim_edit&id=<?= $sid ?>">Bewerken</a>
-              <?php endif; ?>
-
-              <!-- Verwijderen (alleen super) -->
-              <?php if ($isSuper): ?>
-                <form method="post" action="index.php?route=sim_delete" class="d-inline" onsubmit="return confirm('Weet je zeker dat je deze simkaart wil verwijderen?');">
+              <?php if ($canDelete): ?>
+                <form method="post" action="index.php?route=user_delete" class="d-inline" onsubmit="return confirm('Weet je zeker dat je deze gebruiker wil verwijderen?');">
                   <?php if (function_exists('csrf_field')) csrf_field(); ?>
-                  <input type="hidden" name="id" value="<?= $sid ?>">
-                  <button class="btn btn-outline-danger btn-sm">Verwijderen</button>
+                  <input type="hidden" name="id" value="<?= $uid ?>">
+                  <button class="btn btn-outline-danger btn-sm" type="submit">Verwijderen</button>
                 </form>
               <?php endif; ?>
             </div>
@@ -228,18 +243,22 @@ $assignableUsers = $isMgr ? fetch_assignable_users($pdo, $me, $isSuper, $isRes, 
     <nav aria-label="Paginering">
       <ul class="pagination mt-3">
         <?php
-          $window = 2;
-          $start  = max(1, $page - $window);
-          $end    = min($totalPages, $page + $window);
-          $mk = function(int $p, string $label = null, bool $disabled=false, bool $active=false) {
+          // bouw querystring zonder page
+          $qs = $_GET;
+          unset($qs['page']);
+          $base = 'index.php?'.http_build_query(array_merge(['route'=>'users_list'], $qs));
+          $mk = function(int $p, string $label = null, bool $disabled=false, bool $active=false) use ($base) {
             $label = $label ?? (string)$p;
             $cls = 'page-item';
             if ($disabled) $cls .= ' disabled';
             if ($active)   $cls .= ' active';
-            $href = 'index.php?route=sims_list&page='.$p;
+            $href = $base.($base ? '&' : '').'page='.$p;
             return '<li class="'.$cls.'"><a class="page-link" href="'.$href.'">'.$label.'</a></li>';
           };
           echo $mk(max(1,$page-1), '‹', $page<=1);
+          $window = 2;
+          $start  = max(1, $page - $window);
+          $end    = min($totalPages, $page + $window);
           if ($start > 1) {
             echo $mk(1, '1', false, $page===1);
             if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
