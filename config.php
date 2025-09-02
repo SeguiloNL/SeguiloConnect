@@ -4,9 +4,9 @@
 return [
     'db' => [
         'host'    => 'localhost',
-        'name'    => 'seguiloconnect_portal',
-        'user'    => 'seguiloconnect_portal',
-        'pass'    => 'zhvCT7VVbk2Kdy4NEndc',
+        'name'    => 'database_name',
+        'user'    => 'database_user',
+        'pass'    => 'database_password',
         'charset' => 'utf8mb4',
     ],
     'app' => [
