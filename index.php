@@ -18,6 +18,7 @@ $earlyRoutes = [
     'impersonate_stop',
     'sim_bulk_assign',
     'sim_bulk_delete',
+    'sim_bulk_action',
     'plan_delete',
     'order_delete',
     'user_delete',
