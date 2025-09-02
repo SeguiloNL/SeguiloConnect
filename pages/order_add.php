@@ -58,12 +58,21 @@ $hasStatus    = column_exists($pdo,'orders','status');
 $hasCreatedAt = column_exists($pdo,'orders','created_at');
 
 // ------- dropdown data laden -------
-// 1) Klanten (alleen binnen boom van ingelogde gebruiker)
-$tree = build_tree_ids($pdo, (int)$me['id']);
-$customers = [];
-if ($tree) {
+
+// 1) Klanten
+if ($isSuper) {
+  // Super-admin: ALLE eindklanten (of iedereen als 'role' ontbreekt)
+  if (column_exists($pdo,'users','role')) {
+    $customers = $pdo->query("SELECT id,name FROM users WHERE role='customer' ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+  } else {
+    $customers = $pdo->query("SELECT id,name FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+  }
+  // Tree voor validatie hoeft niet; super mag altijd
+  $tree = null;
+} else {
+  // Reseller/Sub-reseller: alleen klanten in eigen boom
+  $tree = build_tree_ids($pdo, (int)$me['id']);
   $ph = implode(',', array_fill(0, count($tree), '?'));
-  // Toon alleen eindklanten (role = customer) als kolom role bestaat; anders iedereen in de boom
   if (column_exists($pdo,'users','role')) {
     $st = $pdo->prepare("SELECT id,name FROM users WHERE role='customer' AND id IN ($ph) ORDER BY name");
   } else {
@@ -73,14 +82,19 @@ if ($tree) {
   $customers = $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// 2) Beschikbare SIMs: in scope én zonder bestaande niet-geannuleerde order
-//    (We sluiten sims uit die al in orders staan met status ≠ 'geannuleerd'.)
+// 2) Beschikbare SIMs: 
+//    - Super-admin: alle vrije SIMs
+//    - Reseller/Sub-reseller: vrije SIMs binnen hun boom (assigned_to_user_id in boom of NULL)
 $sims = [];
 if ($hasSimId && table_exists($pdo,'sims')) {
-  $ph = implode(',', array_fill(0, count($tree), '?'));
-  $joinScope = column_exists($pdo,'sims','assigned_to_user_id')
-    ? " AND (s.assigned_to_user_id IN ($ph) OR s.assigned_to_user_id IS NULL)"
-    : "";
+  $scopeSql = '';
+  $params = [];
+
+  if (!$isSuper && column_exists($pdo,'sims','assigned_to_user_id')) {
+    $ph = implode(',', array_fill(0, count($tree), '?'));
+    $scopeSql = " AND (s.assigned_to_user_id IN ($ph) OR s.assigned_to_user_id IS NULL)";
+    $params = $tree;
+  }
 
   $sqlSims = "
     SELECT s.id, s.iccid, s.imsi
@@ -93,15 +107,11 @@ if ($hasSimId && table_exists($pdo,'sims')) {
       GROUP BY sim_id
     ) o_used ON o_used.sim_id = s.id
     WHERE o_used.sim_id IS NULL
-    $joinScope
+    $scopeSql
     ORDER BY s.id DESC
   ";
   $st = $pdo->prepare($sqlSims);
-  if ($joinScope) {
-    $st->execute($tree);
-  } else {
-    $st->execute();
-  }
+  $st->execute($params);
   $sims = $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
@@ -142,10 +152,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   }
 
   // Extra validaties:
-  // - klant binnen boom
-  if (!in_array($customerId, array_map('intval', $tree), true)) {
-    flash_set('danger','De gekozen klant valt niet binnen jouw beheer.');
-    redirect('index.php?route=order_add');
+  // - klant binnen boom (skip voor super)
+  if (!$isSuper) {
+    if (!in_array($customerId, array_map('intval', $tree), true)) {
+      flash_set('danger','De gekozen klant valt niet binnen jouw beheer.');
+      redirect('index.php?route=order_add');
+    }
   }
 
   // - sim is nog vrij (geen niet-geannuleerde order)
@@ -166,15 +178,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
   // INSERT dynamisch opbouwen
   $fields = [];
-  $values = [];
-
-  if ($hasCustomer) { $fields['customer_user_id'] = $customerId; }
-  if ($hasSimId)    { $fields['sim_id']           = $simId; }
-  if ($hasPlanId)   { $fields['plan_id']          = $planId; }
-  if ($hasReseller) { $fields['reseller_user_id'] = (int)$me['id']; }
-  if ($hasCreatedBy){ $fields['created_by_user_id']= (int)$me['id']; }
-  if ($hasStatus)   { $fields['status']           = 'Concept'; }
-  if ($hasCreatedAt){ $fields['created_at']       = date('Y-m-d H:i:s'); }
+  if ($hasCustomer) { $fields['customer_user_id']   = $customerId; }
+  if ($hasSimId)    { $fields['sim_id']             = $simId; }
+  if ($hasPlanId)   { $fields['plan_id']            = $planId; }
+  if ($hasReseller) { $fields['reseller_user_id']   = (int)$me['id']; }
+  if ($hasCreatedBy){ $fields['created_by_user_id'] = (int)$me['id']; }
+  if ($hasStatus)   { $fields['status']             = 'Concept'; }
+  if ($hasCreatedAt){ $fields['created_at']         = date('Y-m-d H:i:s'); }
 
   if (!$fields) {
     flash_set('danger','Orders-tabel mist vereiste kolommen (minstens sim_id/plan_id).');
@@ -183,15 +193,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
   $cols = array_keys($fields);
   $ph   = array_fill(0, count($cols), '?');
-  $values = array_values($fields);
+  $vals = array_values($fields);
 
   try {
     $sql = "INSERT INTO orders (`" . implode('`,`',$cols) . "`) VALUES (" . implode(',',$ph) . ")";
     $st  = $pdo->prepare($sql);
-    $st->execute($values);
+    $st->execute($vals);
     $newId = (int)$pdo->lastInsertId();
 
-    // >>> Hier de gevraagde redirect + flash <<<
     flash_set('success', 'Bestelling aangemaakt als Concept (#' . $newId . ').');
     redirect('index.php?route=orders_list');
   } catch (Throwable $e) {
@@ -218,6 +227,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         <option value="<?= (int)$c['id'] ?>">#<?= (int)$c['id'] ?> — <?= e($c['name']) ?></option>
       <?php endforeach; ?>
     </select>
+    <?php if ($isSuper): ?>
+      <div class="form-text">Je ziet hier **alle** eindklanten (reseller/sub-reseller inbegrepen).</div>
+    <?php endif; ?>
   </div>
 
   <div class="mb-4">
@@ -230,7 +242,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         </option>
       <?php endforeach; ?>
     </select>
-    <div class="form-text">Alleen SIMs zonder bestaande bestelling (niet-geannuleerd) worden getoond.</div>
+    <div class="form-text">
+      <?= $isSuper ? 'Alle vrije SIMs worden getoond.' : 'Alleen vrije SIMs binnen jouw beheer worden getoond.' ?>
+    </div>
   </div>
 
   <div class="mb-4">
