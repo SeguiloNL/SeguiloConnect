@@ -1,7 +1,5 @@
 <?php
 // pages/order_add.php — nieuwe bestelling (schema-agnostisch)
-// ondersteunt o.a. customer_id vs customer_user_id, reseller_id vs reseller_user_id,
-// ordered_by_user_id vs created_by_user_id
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -76,7 +74,7 @@ $colSim       = first_existing_col($pdo,'orders',['sim_id']);
 $colPlan      = first_existing_col($pdo,'orders',['plan_id']);
 $colStatus    = first_existing_col($pdo,'orders',['status']);
 $colCreated   = first_existing_col($pdo,'orders',['created_at']);
-$colOrderedBy = first_existing_col($pdo,'orders',['ordered_by_user_id','created_by_user_id']); // <-- belangrijk
+$colOrderedBy = first_existing_col($pdo,'orders',['ordered_by_user_id','created_by_user_id']);
 
 // --- dropdown data ---
 // 1) Eindklanten
@@ -99,36 +97,8 @@ if ($isSuper) {
   $customers = $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// 2) Vrije SIMs
-$sims = [];
-if ($colSim && table_exists($pdo,'sims')) {
-  $scopeSql = '';
-  $params   = [];
-
-  if (!$isSuper && column_exists($pdo,'sims','assigned_to_user_id')) {
-    $ph = implode(',', array_fill(0, count($tree), '?'));
-    $scopeSql = " AND (s.assigned_to_user_id IN ($ph) OR s.assigned_to_user_id IS NULL)";
-    $params = $tree;
-  }
-
-  $sqlSims = "
-    SELECT s.id, s.iccid, s.imsi
-    FROM sims s
-    LEFT JOIN (
-      SELECT sim_id
-      FROM orders
-      WHERE sim_id IS NOT NULL
-        AND (status IS NULL OR status <> 'geannuleerd')
-      GROUP BY sim_id
-    ) o_used ON o_used.sim_id = s.id
-    WHERE o_used.sim_id IS NULL
-    $scopeSql
-    ORDER BY s.id DESC
-  ";
-  $st = $pdo->prepare($sqlSims);
-  $st->execute($params);
-  $sims = $st->fetchAll(PDO::FETCH_ASSOC);
-}
+// 2) GEEN vooraf laden van SIMs (we zoeken live via ajax)
+// $sims = [];
 
 // 3) Plannen
 $plans = [];
@@ -212,12 +182,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
   // Insert samenstellen
   $fields = []; $vals = [];
-
   if ($colCustomer)  { $fields[] = "`$colCustomer`";  $vals[] = $customerId; }
   if ($colSim)       { $fields[] = "`$colSim`";       $vals[] = $simId; }
   if ($colPlan)      { $fields[] = "`$colPlan`";      $vals[] = $planId; }
   if ($colReseller && $resellerId !== null) { $fields[] = "`$colReseller`"; $vals[] = $resellerId; }
-  if ($colOrderedBy) { $fields[] = "`$colOrderedBy`"; $vals[] = (int)$me['id']; } // <-- fix voor fk_o_orderedby
+  if ($colOrderedBy) { $fields[] = "`$colOrderedBy`"; $vals[] = (int)$me['id']; }
   if ($colStatus)    { $fields[] = "`$colStatus`";    $vals[] = 'Concept'; }
   if ($colCreated)   { $fields[] = "`$colCreated`";   $vals[] = date('Y-m-d H:i:s'); }
 
@@ -251,9 +220,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 <form method="post" action="index.php?route=order_add" id="orderForm" class="needs-validation">
   <?php if (function_exists('csrf_field')) csrf_field(); ?>
 
-  <!-- Eindklant -->
+  <!-- Eindklant (consistent stacked) -->
   <div class="mb-3">
-    <label for="customerSelect" class="form-label">Eindklant</label>
+    <label for="customerSelect" class="form-label d-block">Eindklant</label>
     <select class="form-select" name="customer_user_id" id="customerSelect" required>
       <option value="">— kies een eindklant —</option>
       <?php foreach ($customers as $c): ?>
@@ -265,32 +234,47 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     <?php endif; ?>
   </div>
 
-  <!-- SIM zoeken/selecteren -->
+  <!-- SIM zoeken/selecteren: strak uitgelijnd -->
   <div class="mb-3">
-    <label class="form-label">SIM kaart</label>
-    <div class="row g-3">
-      <div class="col-md-4">
-        <label for="simSearch" class="form-label small mb-1">Zoek op cijfers (ICCID/IMSI)</label>
-        <input type="text" inputmode="numeric" pattern="[0-9]*"
-               class="form-control" id="simSearch"
-               placeholder="typ minimaal 3 cijfers…">
-        <div class="form-text">Typ 3+ cijfers om vrije SIM’s te laden.</div>
+    <label class="form-label d-block">SIM kaart</label>
+    <div class="d-block">
+      <div class="row row-cols-1 row-cols-md-2 g-3 align-items-start">
+        <div class="col">
+          <div class="d-block">
+            <label for="simSearch" class="form-label small mb-2">Zoek op cijfers (ICCID/IMSI)</label>
+            <input
+              type="text"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              class="form-control"
+              id="simSearch"
+              placeholder="typ minimaal 3 cijfers…"
+              aria-describedby="simHelp">
+            <div id="simHelp" class="form-text">
+              Typ 3+ cijfers. We tonen vrije SIM’s die overeenkomen (ICCID of IMSI).
+            </div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="d-block">
+            <label for="simSelect" class="form-label small mb-2">Kies een vrije SIM</label>
+            <select class="form-select w-100" name="sim_id" id="simSelect" required disabled>
+              <option value="">— eerst zoeken —</option>
+            </select>
+          </div>
+        </div>
       </div>
-      <div class="col-md-8">
-        <label for="simSelect" class="form-label small mb-1">Kies een vrije SIM</label>
-        <select class="form-select" name="sim_id" id="simSelect" required disabled>
-          <option value="">— eerst zoeken —</option>
-        </select>
-      </div>
+
+      <div id="simHint" class="small text-muted mt-2"></div>
     </div>
-    <div id="simHint" class="small text-muted mt-2"></div>
   </div>
 
-  <!-- Abonnement -->
+  <!-- Abonnement (gelijke kaart-hoogtes) -->
   <div class="mb-3">
     <label class="form-label d-block">Abonnement</label>
     <?php if (!$plans): ?>
-      <div class="alert alert-warning">Er zijn (nog) geen actieve abonnementen beschikbaar.</div>
+      <div class="alert alert-warning mb-0">Er zijn (nog) geen actieve abonnementen beschikbaar.</div>
     <?php else: ?>
       <div class="row g-3">
         <?php foreach ($plans as $p): ?>
@@ -304,7 +288,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     <small class="text-muted">ID: <?= (int)$p['id'] ?></small>
                   </div>
                   <div class="mt-2 small">
-                    <!-- details ... -->
+                    <div><strong>Inkoop p/m (ex):</strong> € <?= number_format((float)$p['buy_price_monthly_ex_vat'], 2, ',', '.') ?></div>
+                    <div><strong>Verkoop p/m (ex):</strong> € <?= number_format((float)$p['sell_price_monthly_ex_vat'], 2, ',', '.') ?></div>
+                    <div><strong>Overage inkoop (ex)/MB:</strong> € <?= number_format((float)$p['buy_price_overage_per_mb_ex_vat'], 4, ',', '.') ?></div>
+                    <div><strong>Overage advies (ex)/MB:</strong> € <?= number_format((float)$p['sell_price_overage_per_mb_ex_vat'], 4, ',', '.') ?></div>
+                    <div><strong>Setup (ex):</strong> € <?= number_format((float)$p['setup_fee_ex_vat'], 2, ',', '.') ?></div>
+                    <div><strong>Bundel (GB):</strong> <?= e($p['bundle_gb'] ?? '-') ?></div>
+                    <div><strong>Operator:</strong> <?= e($p['network_operator'] ?? '-') ?></div>
                   </div>
                 </div>
               </div>
@@ -315,15 +305,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     <?php endif; ?>
   </div>
 
-  <!-- Submit -->
   <div class="mt-4">
-    <button type="submit" class="btn btn-primary" id="submitBtn" disabled>
-      Aanmaken (Concept)
-    </button>
+    <button type="submit" class="btn btn-primary" id="submitBtn" disabled>Aanmaken (Concept)</button>
   </div>
 </form>
 
 <script>
+// Form validatie + SIM live search met nette UX
 (function(){
   const customer = document.getElementById('customerSelect');
   const sim      = document.getElementById('simSelect');
@@ -351,14 +339,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
   async function searchSims() {
     const raw = sanitizeDigits(simSearch.value);
-    // lege/reset staat
     sim.innerHTML = '<option value="">— eerst zoeken —</option>';
     sim.disabled = true;
     simHint.textContent = '';
 
     if (raw.length < MIN_DIGITS) { check(); return; }
 
-    // annuleer vorige request
     if (ctrl) ctrl.abort();
     ctrl = new AbortController();
 
@@ -400,7 +386,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     }
   }
 
-  // lichte debounce + live zoeken bij elke wijziging
   simSearch.addEventListener('input', () => {
     simSearch.value = sanitizeDigits(simSearch.value);
     clearTimeout(simSearch._t);
