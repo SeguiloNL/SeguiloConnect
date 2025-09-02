@@ -1,5 +1,5 @@
 <?php
-// pages/order_add.php — nieuwe bestelling
+// pages/order_add.php — nieuwe bestelling (schema-agnostisch: customer_id vs customer_user_id)
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -11,16 +11,16 @@ $isSuper  = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROL
 $isRes    = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
 $isSubRes = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
 
-// Alleen super/res/sub mogen orders aanmaken
 if (!($isSuper || $isRes || $isSubRes)) {
   flash_set('danger','Je hebt geen rechten om bestellingen aan te maken.');
   redirect('index.php?route=orders_list');
 }
 
+// --- DB ---
 try { $pdo = db(); }
 catch (Throwable $e) { echo '<div class="alert alert-danger">PDO connectie niet beschikbaar.</div>'; return; }
 
-// ------- helpers -------
+// --- helpers ---
 function column_exists(PDO $pdo, string $table, string $col): bool {
   $q = $pdo->quote($col);
   $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
@@ -30,13 +30,15 @@ function table_exists(PDO $pdo, string $table): bool {
   $q = $pdo->quote($table);
   return (bool)$pdo->query("SHOW TABLES LIKE {$q}")->fetchColumn();
 }
+function first_existing_col(PDO $pdo, string $table, array $candidates): ?string {
+  foreach ($candidates as $c) if (column_exists($pdo,$table,$c)) return $c;
+  return null;
+}
 function build_tree_ids(PDO $pdo, int $rootId): array {
   if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
-  $ids = [$rootId];
-  $queue = [$rootId];
-  $seen = [$rootId=>true];
+  $ids = [$rootId]; $queue = [$rootId]; $seen = [$rootId=>true];
   while ($queue) {
-    $chunk = array_splice($queue, 0, 100);
+    $chunk = array_splice($queue, 0, 200);
     $ph = implode(',', array_fill(0, count($chunk), '?'));
     $st = $pdo->prepare("SELECT id FROM users WHERE parent_user_id IN ($ph)");
     $st->execute($chunk);
@@ -48,29 +50,44 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
   return $ids;
 }
 
-// ------- kolommen detecteren (orders) -------
-$hasCreatedBy = column_exists($pdo,'orders','created_by_user_id');
-$hasCustomer  = column_exists($pdo,'orders','customer_user_id');
-$hasReseller  = column_exists($pdo,'orders','reseller_user_id');
-$hasSimId     = column_exists($pdo,'orders','sim_id');
-$hasPlanId    = column_exists($pdo,'orders','plan_id');
-$hasStatus    = column_exists($pdo,'orders','status');
-$hasCreatedAt = column_exists($pdo,'orders','created_at');
+/**
+ * Vind de (naaste) reseller/sub-reseller boven een user in de parent-keten.
+ * Retourneert de user-id van die reseller/sub, of null als niet gevonden / geen parent_user_id kolom.
+ */
+function find_reseller_for_customer(PDO $pdo, int $userId): ?int {
+  if (!column_exists($pdo,'users','parent_user_id')) return null;
+  $id = $userId;
+  while ($id) {
+    $st = $pdo->prepare("SELECT id, role, parent_user_id FROM users WHERE id = ? LIMIT 1");
+    $st->execute([$id]);
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$row) break;
+    $role = $row['role'] ?? '';
+    if (in_array($role, ['reseller','sub_reseller'], true)) return (int)$row['id'];
+    $id = (int)($row['parent_user_id'] ?? 0);
+  }
+  return null;
+}
 
-// ------- dropdown data laden -------
+// --- kolommen van ORDERS (schema-agnostisch) ---
+$colCustomer = first_existing_col($pdo,'orders',['customer_user_id','customer_id']);
+$colReseller = first_existing_col($pdo,'orders',['reseller_user_id','reseller_id']);
+$colSim      = first_existing_col($pdo,'orders',['sim_id']);
+$colPlan     = first_existing_col($pdo,'orders',['plan_id']);
+$colStatus   = first_existing_col($pdo,'orders',['status']);
+$colCreated  = first_existing_col($pdo,'orders',['created_at']);
+$colCreatedBy= first_existing_col($pdo,'orders',['created_by_user_id']);
 
+// --- dropdown data ---
 // 1) Klanten
 if ($isSuper) {
-  // Super-admin: ALLE eindklanten (of iedereen als 'role' ontbreekt)
   if (column_exists($pdo,'users','role')) {
     $customers = $pdo->query("SELECT id,name FROM users WHERE role='customer' ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
   } else {
     $customers = $pdo->query("SELECT id,name FROM users ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
   }
-  // Tree voor validatie hoeft niet; super mag altijd
-  $tree = null;
+  $tree = null; // super hoeft niet te beperken
 } else {
-  // Reseller/Sub-reseller: alleen klanten in eigen boom
   $tree = build_tree_ids($pdo, (int)$me['id']);
   $ph = implode(',', array_fill(0, count($tree), '?'));
   if (column_exists($pdo,'users','role')) {
@@ -82,13 +99,11 @@ if ($isSuper) {
   $customers = $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// 2) Beschikbare SIMs: 
-//    - Super-admin: alle vrije SIMs
-//    - Reseller/Sub-reseller: vrije SIMs binnen hun boom (assigned_to_user_id in boom of NULL)
+// 2) Vrije SIMs
 $sims = [];
-if ($hasSimId && table_exists($pdo,'sims')) {
+if ($colSim && table_exists($pdo,'sims')) {
   $scopeSql = '';
-  $params = [];
+  $params   = [];
 
   if (!$isSuper && column_exists($pdo,'sims','assigned_to_user_id')) {
     $ph = implode(',', array_fill(0, count($tree), '?'));
@@ -115,9 +130,9 @@ if ($hasSimId && table_exists($pdo,'sims')) {
   $sims = $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// 3) Plannen (alleen actieve plannen als kolom is_active bestaat)
+// 3) Plannen
 $plans = [];
-if ($hasPlanId && table_exists($pdo,'plans')) {
+if ($colPlan && table_exists($pdo,'plans')) {
   $where = [];
   if (column_exists($pdo,'plans','is_active')) $where[] = 'is_active = 1';
   $sqlPlans = "SELECT id, name,
@@ -134,7 +149,7 @@ if ($hasPlanId && table_exists($pdo,'plans')) {
   $plans = $pdo->query($sqlPlans)->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// ------- POST: opslaan -------
+// --- POST: opslaan ---
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   try { if (function_exists('verify_csrf')) verify_csrf(); }
   catch (Throwable $e) {
@@ -151,65 +166,84 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     redirect('index.php?route=order_add');
   }
 
-  // Extra validaties:
-  // - klant binnen boom (skip voor super)
+  // Bestaat klant echt? (FK-veilig)
+  $st = $pdo->prepare("SELECT COUNT(*) FROM users WHERE id = ?");
+  $st->execute([$customerId]);
+  if ((int)$st->fetchColumn() === 0) {
+    flash_set('danger','De gekozen klant bestaat niet (meer).');
+    redirect('index.php?route=order_add');
+  }
+
+  // Scope-klant (behalve super)
   if (!$isSuper) {
-    if (!in_array($customerId, array_map('intval', $tree), true)) {
+    $tree = $tree ?? build_tree_ids($pdo, (int)$me['id']);
+    if (!in_array($customerId, array_map('intval',$tree), true)) {
       flash_set('danger','De gekozen klant valt niet binnen jouw beheer.');
       redirect('index.php?route=order_add');
     }
   }
 
-  // - sim is nog vrij (geen niet-geannuleerde order)
-  $st = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE sim_id = ? AND (status IS NULL OR status <> 'geannuleerd')");
-  $st->execute([$simId]);
-  if ((int)$st->fetchColumn() > 0) {
-    flash_set('danger','De gekozen SIM is al in gebruik in een andere bestelling.');
-    redirect('index.php?route=order_add');
+  // SIM is vrij (FK op sim_id is prima; we blokkeren alleen bestaande niet-geannuleerde orders)
+  if ($colSim) {
+    $st = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE $colSim = ? AND (status IS NULL OR status <> 'geannuleerd')");
+    $st->execute([$simId]);
+    if ((int)$st->fetchColumn() > 0) {
+      flash_set('danger','De gekozen SIM is al in gebruik in een andere bestelling.');
+      redirect('index.php?route=order_add');
+    }
   }
 
-  // - plan bestaat en (indien kolom) is actief
-  $st = $pdo->prepare("SELECT COUNT(*) FROM plans WHERE id = ?" . (column_exists($pdo,'plans','is_active') ? " AND is_active = 1" : ""));
-  $st->execute([$planId]);
-  if ((int)$st->fetchColumn() === 0) {
-    flash_set('danger','Ongeldig of inactief abonnement.');
-    redirect('index.php?route=order_add');
+  // Plan is geldig (en actief indien kolom bestaat)
+  if ($colPlan) {
+    $st = $pdo->prepare("SELECT COUNT(*) FROM plans WHERE id = ?" . (column_exists($pdo,'plans','is_active') ? " AND is_active = 1" : ""));
+    $st->execute([$planId]);
+    if ((int)$st->fetchColumn() === 0) {
+      flash_set('danger','Ongeldig of inactief abonnement.');
+      redirect('index.php?route=order_add');
+    }
   }
 
-  // INSERT dynamisch opbouwen
-  $fields = [];
-  if ($hasCustomer) { $fields['customer_user_id']   = $customerId; }
-  if ($hasSimId)    { $fields['sim_id']             = $simId; }
-  if ($hasPlanId)   { $fields['plan_id']            = $planId; }
-  if ($hasReseller) { $fields['reseller_user_id']   = (int)$me['id']; }
-  if ($hasCreatedBy){ $fields['created_by_user_id'] = (int)$me['id']; }
-  if ($hasStatus)   { $fields['status']             = 'Concept'; }
-  if ($hasCreatedAt){ $fields['created_at']         = date('Y-m-d H:i:s'); }
+  // Reseller bepalen (indien kolom bestaat)
+  $resellerId = null;
+  if ($colReseller) {
+    // 1) probeer reseller boven de klant te vinden
+    $resellerId = find_reseller_for_customer($pdo, $customerId);
+    // 2) zo niet: neem huidige gebruiker als die reseller/sub is
+    if ($resellerId === null && ($isRes || $isSubRes)) $resellerId = (int)$me['id'];
+    // super_admin zonder reseller boven de klant → blijft NULL (mag bij NULLABLE FK)
+  }
+
+  // Insert samenstellen op basis van bestaande kolommen
+  $fields = []; $vals = [];
+
+  if ($colCustomer) { $fields[] = "`$colCustomer`"; $vals[] = $customerId; }
+  if ($colSim)      { $fields[] = "`$colSim`";      $vals[] = $simId; }
+  if ($colPlan)     { $fields[] = "`$colPlan`";     $vals[] = $planId; }
+  if ($colReseller && $resellerId !== null) { $fields[] = "`$colReseller`"; $vals[] = $resellerId; }
+  if ($colCreatedBy){ $fields[] = "`$colCreatedBy`"; $vals[] = (int)$me['id']; }
+  if ($colStatus)   { $fields[] = "`$colStatus`";   $vals[] = 'Concept'; }
+  if ($colCreated)  { $fields[] = "`$colCreated`";  $vals[] = date('Y-m-d H:i:s'); }
 
   if (!$fields) {
-    flash_set('danger','Orders-tabel mist vereiste kolommen (minstens sim_id/plan_id).');
+    flash_set('danger','Orders-tabel mist vereiste kolommen (minstens klant/sim/plan).');
     redirect('index.php?route=orders_list');
   }
 
-  $cols = array_keys($fields);
-  $ph   = array_fill(0, count($cols), '?');
-  $vals = array_values($fields);
-
+  $place = implode(',', array_fill(0, count($fields), '?'));
+  $sql = "INSERT INTO orders (" . implode(',', $fields) . ") VALUES ($place)";
   try {
-    $sql = "INSERT INTO orders (`" . implode('`,`',$cols) . "`) VALUES (" . implode(',',$ph) . ")";
-    $st  = $pdo->prepare($sql);
+    $st = $pdo->prepare($sql);
     $st->execute($vals);
     $newId = (int)$pdo->lastInsertId();
-
     flash_set('success', 'Bestelling aangemaakt als Concept (#' . $newId . ').');
     redirect('index.php?route=orders_list');
   } catch (Throwable $e) {
-    flash_set('danger','Opslaan mislukt: ' . $e->getMessage());
+    flash_set('danger', 'Opslaan mislukt: ' . $e->getMessage());
     redirect('index.php?route=order_add');
   }
 }
 
-// ------- Form tonen -------
+// --- Form tonen ---
 ?>
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="mb-0">Nieuwe bestelling</h4>
@@ -228,7 +262,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
       <?php endforeach; ?>
     </select>
     <?php if ($isSuper): ?>
-      <div class="form-text">Je ziet hier **alle** eindklanten (reseller/sub-reseller inbegrepen).</div>
+      <div class="form-text">Super-admin ziet hier alle eindklanten.</div>
     <?php endif; ?>
   </div>
 
@@ -242,9 +276,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         </option>
       <?php endforeach; ?>
     </select>
-    <div class="form-text">
-      <?= $isSuper ? 'Alle vrije SIMs worden getoond.' : 'Alleen vrije SIMs binnen jouw beheer worden getoond.' ?>
-    </div>
+    <div class="form-text"><?= $isSuper ? 'Alle vrije SIMs worden getoond.' : 'Vrije SIMs binnen jouw beheer.' ?></div>
   </div>
 
   <div class="mb-4">
@@ -287,7 +319,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 </form>
 
 <script>
-// Knop pas activeren als klant, sim en plan gekozen zijn
+// Submit pas aan als klant, sim en plan gekozen zijn
 (function(){
   const customer = document.getElementById('customerSelect');
   const sim      = document.getElementById('simSelect');
