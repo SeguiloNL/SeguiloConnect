@@ -2,7 +2,6 @@
 // pages/ajax_sims_search.php
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
-
 header('Content-Type: application/json');
 
 $me = auth_user();
@@ -24,23 +23,19 @@ function table_exists(PDO $pdo, string $table): bool {
   return (bool)$pdo->query("SHOW TABLES LIKE {$q}")->fetchColumn();
 }
 
-// beveiliging + validatie
-$q = trim((string)($_GET['q'] ?? ''));
-if (!preg_match('/^\d{5}$/', $q)) { echo json_encode([]); exit; }
-
-// basis: alleen als de sims-tabel bestaat
+// --- validatie ---
+$q = preg_replace('/\D+/', '', (string)($_GET['q'] ?? ''));
+if ($q === '') { echo json_encode([]); exit; }
 if (!table_exists($pdo,'sims')) { echo json_encode([]); exit; }
 
-// scope opbouwen voor resellers/subs
+// --- scope ---
 $params = [];
 $scope  = '';
 if (!$isSuper && column_exists($pdo,'sims','assigned_to_user_id')) {
-  // bouw tree via users.parent_user_id
+  // kleine BFS
   $ids = [$me['id']];
   if (column_exists($pdo,'users','parent_user_id')) {
-    // eenvoudige BFS (kleine variant, voldoende hier)
-    $queue = [$me['id']];
-    $seen = [$me['id'] => true];
+    $queue = [$me['id']]; $seen = [$me['id'] => true];
     while ($queue) {
       $chunk = array_splice($queue, 0, 200);
       $ph = implode(',', array_fill(0, count($chunk), '?'));
@@ -57,14 +52,8 @@ if (!$isSuper && column_exists($pdo,'sims','assigned_to_user_id')) {
   $params = array_map('intval', $ids);
 }
 
-// filter op laatste 5 cijfers iccid (en optioneel imsi)
-$like = '%' . $q;
-$filter = " (s.iccid LIKE ?".(column_exists($pdo,'sims','imsi') ? " OR s.imsi LIKE ?" : "").") ";
-array_unshift($params, $like);
-if (column_exists($pdo,'sims','imsi')) $params[] = $like;
-
-// alleen vrije sims: niet in orders met (status is null of <> 'geannuleerd')
-$ordersSimCol = 'sim_id'; // jouw code gebruikt deze kolom al
+// --- vrije sims join ---
+$ordersSimCol = 'sim_id';
 $freeJoin = "
   LEFT JOIN (
     SELECT $ordersSimCol AS sim_id_used
@@ -75,13 +64,33 @@ $freeJoin = "
   ) o_used ON o_used.sim_id_used = s.id
 ";
 
+// --- filter (ICCID/IMSI) ---
+$hasImsi = column_exists($pdo,'sims','imsi');
+$filterSql = '';
+if (strlen($q) <= 7) {
+  // snelle suffix-match
+  $filterSql = " (RIGHT(s.iccid, ?) = ?"
+             . ($hasImsi ? " OR RIGHT(s.imsi, ?) = ?" : "")
+             . ") ";
+  array_unshift($params, strlen($q), $q);
+  if ($hasImsi) { $params[] = strlen($q); $params[] = $q; }
+} else {
+  // contains-match
+  $like = '%' . $q . '%';
+  $filterSql = " (s.iccid LIKE ?"
+             . ($hasImsi ? " OR s.imsi LIKE ?" : "")
+             . ") ";
+  array_unshift($params, $like);
+  if ($hasImsi) { $params[] = $like; }
+}
+
 $sql = "
   SELECT s.id, s.iccid
-         ".(column_exists($pdo,'sims','imsi') ? ", s.imsi" : ", NULL AS imsi")."
+         ".($hasImsi ? ", s.imsi" : ", NULL AS imsi")."
   FROM sims s
   $freeJoin
   WHERE o_used.sim_id_used IS NULL
-    AND $filter
+    AND $filterSql
     $scope
   ORDER BY s.id DESC
   LIMIT 50

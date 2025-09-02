@@ -265,24 +265,32 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   </div>
 
     <div class="mb-4">
-    <label class="form-label">SIM kaart</label>
+  <label class="form-label">SIM kaart</label>
 
-    <div class="row g-2 align-items-end">
-      <div class="col-sm-6 col-md-4">
-        <label for="simSearch" class="form-label small mb-1">Zoek op laatste 5 cijfers</label>
-        <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5"
-               class="form-control" id="simSearch" placeholder="bijv. 12345">
-        <div class="form-text">Typ exact 5 cijfers. We laden dan alleen passende vrije SIM’s.</div>
-      </div>
-      <div class="col-sm-6 col-md-8">
-        <label for="simSelect" class="form-label small mb-1">Kies een vrije SIM</label>
-        <select class="form-select" name="sim_id" id="simSelect" required disabled>
-          <option value="">— eerst zoeken op laatste 5 cijfers —</option>
-        </select>
+  <div class="row g-2 align-items-end">
+    <div class="col-sm-6 col-md-4">
+      <label for="simSearch" class="form-label small mb-1">Zoek op cijfers (ICCID/IMSI)</label>
+      <input
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        class="form-control"
+        id="simSearch"
+        placeholder="typ minimaal 3 cijfers…">
+      <div class="form-text">
+        Typ 3+ cijfers. We tonen vrije SIM’s die overeenkomen (ICCID of IMSI).
       </div>
     </div>
-    <div id="simHint" class="small text-muted mt-1"></div>
+    <div class="col-sm-6 col-md-8">
+      <label for="simSelect" class="form-label small mb-1">Kies een vrije SIM</label>
+      <select class="form-select" name="sim_id" id="simSelect" required disabled>
+        <option value="">— eerst zoeken —</option>
+      </select>
+    </div>
   </div>
+
+  <div id="simHint" class="small text-muted mt-1"></div>
+</div>
 
   <div class="mb-4">
     <label class="form-label d-block">Abonnement</label>
@@ -324,7 +332,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 </form>
 
 <script>
-// Submit pas aan als klant, sim en plan gekozen zijn
 (function(){
   const customer = document.getElementById('customerSelect');
   const sim      = document.getElementById('simSelect');
@@ -332,6 +339,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   const btn      = document.getElementById('submitBtn');
   const simSearch= document.getElementById('simSearch');
   const simHint  = document.getElementById('simHint');
+
+  const MIN_DIGITS = 3;
+  let ctrl = null;
 
   function check() {
     const hasCustomer = customer && customer.value !== '';
@@ -345,28 +355,25 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   if (sim) sim.addEventListener('change', check);
   plans.forEach(r => r.addEventListener('change', check));
 
-  // --- SIM live search (exact 5 cijfers) ---
-  let ctrl = null; // abortcontroller voor snelle nieuwe zoekopdrachten
+  function sanitizeDigits(v){ return (v || '').replace(/\D+/g,''); }
+
   async function searchSims() {
-    const q = (simSearch.value || '').trim();
-    sim.innerHTML = '<option value="">— eerst zoeken op laatste 5 cijfers —</option>';
+    const raw = sanitizeDigits(simSearch.value);
+    // lege/reset staat
+    sim.innerHTML = '<option value="">— eerst zoeken —</option>';
     sim.disabled = true;
     simHint.textContent = '';
 
-    if (!/^\d{5}$/.test(q)) {
-      check();
-      return;
-    }
+    if (raw.length < MIN_DIGITS) { check(); return; }
+
     // annuleer vorige request
     if (ctrl) ctrl.abort();
     ctrl = new AbortController();
 
     simHint.textContent = 'Zoeken…';
     try {
-      const resp = await fetch('index.php?route=ajax_sims_search&q=' + encodeURIComponent(q), {
-        signal: ctrl.signal,
-        headers: { 'X-Requested-With': 'XMLHttpRequest' }
-      });
+      const url = 'index.php?route=ajax_sims_search&q=' + encodeURIComponent(raw);
+      const resp = await fetch(url, { signal: ctrl.signal, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const data = await resp.json();
 
@@ -374,7 +381,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
       if (!Array.isArray(data) || data.length === 0) {
         sim.innerHTML = '<option value="">— geen vrije SIM’s gevonden —</option>';
         sim.disabled = true;
-        simHint.textContent = 'Geen resultaten voor *' + q + '*.';
+        simHint.textContent = 'Geen resultaten voor ' + raw + '.';
       } else {
         const frag = document.createDocumentFragment();
         const first = document.createElement('option');
@@ -401,8 +408,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     }
   }
 
+  // lichte debounce + live zoeken bij elke wijziging
   simSearch.addEventListener('input', () => {
-    // licht debounce-achtig: wacht heel kort zodat snel typen minder requests doet
+    simSearch.value = sanitizeDigits(simSearch.value);
     clearTimeout(simSearch._t);
     simSearch._t = setTimeout(searchSims, 200);
   });
