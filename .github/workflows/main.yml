@@ -1,0 +1,57 @@
+name: Deploy naar DirectAdmin via SFTP
+
+on:
+  push:
+    branches: [ "main" ]      # pas aan als je een andere branch gebruikt
+  workflow_dispatch:          # handmatig starten vanuit Actions-tab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -- Optioneel: build/prepare stap (laat staan bij PHP-only) --
+      # - name: Build
+      #   run: |
+      #     npm ci
+      #     npm run build
+
+      - name: Upload files via SFTP
+        uses: wlixcc/SFTP-Deploy@v1.2.6
+        with:
+          server: ${{ secrets.SFTP_HOST }}       # bv. ftp.jouwdomein.nl
+          port: ${{ secrets.SFTP_PORT }}         # meestal 22
+          username: ${{ secrets.SFTP_USER }}     # DirectAdmin SFTP user
+          # Gebruik EEN van de twee authenticaties:
+          password: ${{ secrets.SFTP_PASSWORD }} # of:
+          # ssh_private_key: ${{ secrets.SFTP_PRIVATE_KEY }}
+
+          local_path: "./"                       # of ./dist als je buildt
+          remote_path: "public_html/"            # pas aan naar jouw webroot
+          delete_remote_files: false             # true = echt syncen (voorzichtig)
+          exclude: |                             # bestanden/mappen die je niet wilt uploaden
+            .git*
+            .github/**
+            node_modules/**
+            **/*.map
+            **/.DS_Store
+            **/README.md
+            **/composer.lock
+            **/.env*
+
+      # -- Optioneel: permissies fixen NA upload (als je SSH key gebruikt) --
+      # - name: Fix permissions
+      #   if: ${{ false }} # zet op true als je SSH gebruikt en permissies wilt zetten
+      #   uses: appleboy/ssh-action@v1.1.0
+      #   with:
+      #     host: ${{ secrets.SFTP_HOST }}
+      #     username: ${{ secrets.SFTP_USER }}
+      #     key: ${{ secrets.SFTP_PRIVATE_KEY }}
+      #     port: ${{ secrets.SFTP_PORT }}
+      #     script: |
+      #       cd public_html
+      #       find . -type d -exec chmod 755 {} \;
+      #       find . -type f -exec chmod 644 {} \;
