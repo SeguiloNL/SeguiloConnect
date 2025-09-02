@@ -1,15 +1,15 @@
 <?php
-// pages/orders_list.php — overzicht bestellingen
+// pages/orders_list.php — overzicht bestellingen + "Nieuwe bestelling"-knop
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
 $me = auth_user();
 if (!$me) { header('Location: index.php?route=login'); exit; }
 
-$role     = $me['role'] ?? '';
-$isSuper  = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
-$isRes    = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
-$isSubRes = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
+$role       = $me['role'] ?? '';
+$isSuper    = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
+$isRes      = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
+$isSubRes   = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
 $isCustomer = !($isSuper || $isRes || $isSubRes);
 
 // --- DB ---
@@ -46,19 +46,18 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
 
 // --- kolommen/joins mogelijk? ---
 $hasCreatedBy   = column_exists($pdo, 'orders', 'created_by_user_id');
-$hasCustomerCol = column_exists($pdo, 'orders', 'customer_user_id'); // als aanwezig gebruiken we deze voor klant
+$hasCustomerCol = column_exists($pdo, 'orders', 'customer_user_id');
 $hasResellerCol = column_exists($pdo, 'orders', 'reseller_user_id'); // optioneel
 $hasSimId       = column_exists($pdo, 'orders', 'sim_id');
 $hasPlanId      = column_exists($pdo, 'orders', 'plan_id');
 $hasCreatedAt   = column_exists($pdo, 'orders', 'created_at');
 $hasUpdatedAt   = column_exists($pdo, 'orders', 'updated_at');
 
-// target-tabellen
 $tblSims  = table_exists($pdo, 'sims');
 $tblPlans = table_exists($pdo, 'plans');
 
 // --- filters ---
-$status   = trim((string)($_GET['status'] ?? '')); // bijv. 'Concept','Wachten op activatie','Voltooid','geannuleerd'
+$status   = trim((string)($_GET['status'] ?? ''));
 $q        = trim((string)($_GET['q'] ?? ''));
 
 // paginatie
@@ -81,98 +80,64 @@ if ($hasUpdatedAt)   $selectCols[] = 'o.updated_at';
 $sqlFrom = " FROM orders o ";
 $sqlJoin = "";
 
-// Join klant (user)
+// klant
 if ($hasCustomerCol) {
     $sqlJoin .= " LEFT JOIN users u_customer ON u_customer.id = o.customer_user_id ";
-} else {
-    // fallback: als er geen customer_user_id is, toon eventueel maker als "klant"
-    if ($hasCreatedBy) {
-        $sqlJoin .= " LEFT JOIN users u_customer ON u_customer.id = o.created_by_user_id ";
-    }
+} elseif ($hasCreatedBy) {
+    $sqlJoin .= " LEFT JOIN users u_customer ON u_customer.id = o.created_by_user_id ";
 }
-// Join reseller (optioneel, als je het wil tonen; hier niet zichtbaar in lijst maar kan in filter nodig zijn)
-// $sqlJoin .= $hasResellerCol ? " LEFT JOIN users u_reseller ON u_reseller.id = o.reseller_user_id " : "";
 
-// Join sim (ICCID)
+// sim
 if ($hasSimId && $tblSims) {
     $sqlJoin .= " LEFT JOIN sims s ON s.id = o.sim_id ";
 }
-// Join plan (naam/prijzen)
+// plan
 if ($hasPlanId && $tblPlans) {
     $sqlJoin .= " LEFT JOIN plans p ON p.id = o.plan_id ";
 }
 
-// --- WHERE + params (één pad, geen mismatch) ---
+// --- WHERE + params ---
 $where  = [];
 $params = [];
 
-// status-filter (optioneel)
+// status
 if ($status !== '') {
     $where[]  = 'o.status = ?';
     $params[] = $status;
 }
 
 // zoeken
-// - in id exact (#123)
-// - in klantnaam (u_customer.name)
-// - in sim ICCID (s.iccid) indien aanwezig
-// - in plan naam (p.name) indien aanwezig
 if ($q !== '') {
     $or = [];
-    // nummer
-    if (ctype_digit($q)) {
-        $or[]    = 'o.id = ?';
-        $params[] = (int)$q;
-    }
-    // klantnaam
+    if (ctype_digit($q)) { $or[]='o.id = ?'; $params[]=(int)$q; }
     $or[] = '(u_customer.name LIKE ?)';
     $params[] = '%' . $q . '%';
-    // iccid
-    if ($tblSims && column_exists($pdo, 'sims', 'iccid') && $hasSimId) {
-        $or[]    = '(s.iccid LIKE ?)';
-        $params[] = '%' . $q . '%';
-    }
-    // plan naam
-    if ($tblPlans && column_exists($pdo, 'plans', 'name') && $hasPlanId) {
-        $or[]    = '(p.name LIKE ?)';
-        $params[] = '%' . $q . '%';
-    }
+    if ($tblSims && column_exists($pdo,'sims','iccid') && $hasSimId) { $or[]='(s.iccid LIKE ?)'; $params[]='%'.$q.'%'; }
+    if ($tblPlans && column_exists($pdo,'plans','name') && $hasPlanId) { $or[]='(p.name LIKE ?)'; $params[]='%'.$q.'%'; }
     $where[] = '(' . implode(' OR ', $or) . ')';
 }
 
-// scope per rol
+// scope
 if (!$isSuper) {
-    // bouw boom van zichtbare gebruikers
     $treeIds = build_tree_ids($pdo, (int)$me['id']);
-
-    // Voor resellers/sub: orders die door hen/onder hen zijn aangemaakt OF met klant binnen de boom.
-    // Voor eindklant: orders die hij zelf heeft aangemaakt OF waar hij klant is.
     $scopes = [];
     if ($hasCreatedBy) {
         $ph = implode(',', array_fill(0, count($treeIds), '?'));
-        $scopes[] = "o.created_by_user_id IN ($ph)";           // door boom aangemaakt
+        $scopes[] = "o.created_by_user_id IN ($ph)";
         array_push($params, ...$treeIds);
-    } else {
-        // Geen created_by_user_id → fallback: niets toevoegen
     }
-
     if ($hasCustomerCol) {
         $ph2 = implode(',', array_fill(0, count($treeIds), '?'));
-        $scopes[] = "o.customer_user_id IN ($ph2)";            // klant in boom
+        $scopes[] = "o.customer_user_id IN ($ph2)";
         array_push($params, ...$treeIds);
-    } else {
-        // Geen customer_user_id → niets extra
     }
-
     if ($scopes) {
         $where[] = '(' . implode(' OR ', $scopes) . ')';
     } else {
-        // Als er geen scopekolommen zijn, laat dan alleen eigen records zien op id=me (veilige fallback)
-        $where[]  = '1=0';
+        $where[] = '1=0';
     }
 }
 
-// combineer WHERE
 $sqlWhere = $where ? (' WHERE ' . implode(' AND ', $where)) : '';
 
 // --- COUNT ---
@@ -207,21 +172,30 @@ function orders_url(array $extra = []): string {
     return $base . '?' . http_build_query($params);
 }
 ?>
-<div class="d-flex align-items-center justify-content-between mb-3">
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
   <h4 class="mb-0">Bestellingen</h4>
-  <form class="d-flex gap-2" method="get" action="index.php">
-    <input type="hidden" name="route" value="orders_list">
-    <?php if ($status !== ''): ?>
-      <input type="hidden" name="status" value="<?= e($status) ?>">
+
+  <div class="d-flex align-items-center gap-2">
+    <form class="d-flex gap-2" method="get" action="index.php">
+      <input type="hidden" name="route" value="orders_list">
+      <?php if ($status !== ''): ?>
+        <input type="hidden" name="status" value="<?= e($status) ?>">
+      <?php endif; ?>
+      <input type="text" class="form-control" name="q" value="<?= e($q) ?>" placeholder="Zoek op #id / klant / ICCID / plan">
+      <select class="form-select" name="per_page" onchange="this.form.submit()">
+        <?php foreach ([25,50,100,1000,5000] as $opt): ?>
+          <option value="<?= $opt ?>" <?= $perPage===$opt?'selected':'' ?>><?= $opt ?>/pag.</option>
+        <?php endforeach; ?>
+      </select>
+      <button class="btn btn-outline-light border">Zoeken</button>
+    </form>
+
+    <?php if (!$isCustomer): ?>
+      <a class="btn btn-primary" href="index.php?route=order_add">
+        Nieuwe bestelling
+      </a>
     <?php endif; ?>
-    <input type="text" class="form-control" name="q" value="<?= e($q) ?>" placeholder="Zoek op #id / klant / ICCID / plan">
-    <select class="form-select" name="per_page" onchange="this.form.submit()">
-      <?php foreach ([25,50,100,1000,5000] as $opt): ?>
-        <option value="<?= $opt ?>" <?= $perPage===$opt?'selected':'' ?>><?= $opt ?>/pag.</option>
-      <?php endforeach; ?>
-    </select>
-    <button class="btn btn-outline-secondary">Zoeken</button>
-  </form>
+  </div>
 </div>
 
 <div class="mb-3">
@@ -260,7 +234,6 @@ function orders_url(array $extra = []): string {
                 if ($hasCustomerCol && !empty($r['customer_user_id'])) {
                     echo e('#'.$r['customer_user_id'].' — '.($custName ?: 'Onbekend'));
                 } elseif ($hasCreatedBy && !empty($r['created_by_user_id'])) {
-                    // fallback
                     echo e('#'.$r['created_by_user_id'].' — '.($custName ?: 'Onbekend'));
                 } else {
                     echo '<span class="text-muted">—</span>';
@@ -272,13 +245,9 @@ function orders_url(array $extra = []): string {
             <td><?= e($r['status'] ?? '') ?></td>
             <td>
               <?php
-                if (!empty($r['created_at'])) {
-                    echo e($r['created_at']);
-                } elseif (!empty($r['updated_at'])) {
-                    echo e($r['updated_at']);
-                } else {
-                    echo '<span class="text-muted">—</span>';
-                }
+                if (!empty($r['created_at'])) echo e($r['created_at']);
+                elseif (!empty($r['updated_at'])) echo e($r['updated_at']);
+                else echo '<span class="text-muted">—</span>';
               ?>
             </td>
             <td>
@@ -289,8 +258,7 @@ function orders_url(array $extra = []): string {
                   $canDelete = false;
                   if ($isSuper) {
                       $canDelete = true;
-                  } elseif ($isRes) {
-                      // reseller: binnen eigen boom (via created_by of customer)
+                  } elseif ($isRes || $isSubRes) {
                       $treeIds = build_tree_ids($pdo, (int)$me['id']);
                       if ($hasCreatedBy && in_array((int)($r['created_by_user_id'] ?? 0), $treeIds, true)) $canDelete = true;
                       if ($hasCustomerCol && in_array((int)($r['customer_user_id'] ?? 0), $treeIds, true)) $canDelete = true;
