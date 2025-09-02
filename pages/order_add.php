@@ -248,11 +248,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   <a class="btn btn-secondary" href="index.php?route=orders_list">Terug</a>
 </div>
 
-<form method="post" action="index.php?route=order_add" id="orderForm">
+<form method="post" action="index.php?route=order_add" id="orderForm" class="needs-validation">
   <?php if (function_exists('csrf_field')) csrf_field(); ?>
 
-  <div class="mb-4">
-    <label class="form-label">Eindklant</label>
+  <!-- Eindklant -->
+  <div class="mb-3">
+    <label for="customerSelect" class="form-label">Eindklant</label>
     <select class="form-select" name="customer_user_id" id="customerSelect" required>
       <option value="">— kies een eindklant —</option>
       <?php foreach ($customers as $c): ?>
@@ -264,48 +265,29 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     <?php endif; ?>
   </div>
 
-<div class="mb-4">
-  <label class="form-label">SIM kaart</label>
-
-  <!-- Hele simkaart-sectie als d-block -->
-  <div class="d-block">
-    <div class="row row-cols-1 row-cols-md-2 g-3 align-items-start">
-      <div class="col">
-        <div class="d-block">
-          <label for="simSearch" class="form-label small mb-2">Zoek op cijfers (ICCID/IMSI)</label>
-          <input
-            type="text"
-            inputmode="numeric"
-            pattern="[0-9]*"
-            class="form-control"
-            id="simSearch"
-            placeholder="typ minimaal 3 cijfers…"
-            aria-describedby="simHelp">
-          <div id="simHelp" class="form-text">
-            Typ 3+ cijfers. We tonen vrije SIM’s die overeenkomen (ICCID of IMSI).
-          </div>
-        </div>
+  <!-- SIM zoeken/selecteren -->
+  <div class="mb-3">
+    <label class="form-label">SIM kaart</label>
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label for="simSearch" class="form-label small mb-1">Zoek op cijfers (ICCID/IMSI)</label>
+        <input type="text" inputmode="numeric" pattern="[0-9]*"
+               class="form-control" id="simSearch"
+               placeholder="typ minimaal 3 cijfers…">
+        <div class="form-text">Typ 3+ cijfers om vrije SIM’s te laden.</div>
       </div>
-
-      <div class="col">
-        <!-- Sim-select deel óók expliciet in een d-block -->
-        <div class="d-block">
-          <label for="simSelect" class="form-label small mb-2">Kies een vrije SIM</label>
-          <select class="form-select w-100" name="sim_id" id="simSelect" required disabled>
-            <option value="">— eerst zoeken —</option>
-          </select>
-        </div>
+      <div class="col-md-8">
+        <label for="simSelect" class="form-label small mb-1">Kies een vrije SIM</label>
+        <select class="form-select" name="sim_id" id="simSelect" required disabled>
+          <option value="">— eerst zoeken —</option>
+        </select>
       </div>
     </div>
-
     <div id="simHint" class="small text-muted mt-2"></div>
   </div>
-</div>
 
-  <div id="simHint" class="small text-muted mt-1"></div>
-</div>
-
-  <div class="mb-4">
+  <!-- Abonnement -->
+  <div class="mb-3">
     <label class="form-label d-block">Abonnement</label>
     <?php if (!$plans): ?>
       <div class="alert alert-warning">Er zijn (nog) geen actieve abonnementen beschikbaar.</div>
@@ -315,20 +297,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
           <div class="col-md-6">
             <label class="w-100">
               <input class="form-check-input me-2" type="radio" name="plan_id" value="<?= (int)$p['id'] ?>">
-              <div class="card">
+              <div class="card h-100">
                 <div class="card-body py-3">
                   <div class="d-flex justify-content-between align-items-center">
                     <h6 class="mb-0"><?= e($p['name']) ?></h6>
                     <small class="text-muted">ID: <?= (int)$p['id'] ?></small>
                   </div>
                   <div class="mt-2 small">
-                    <div><strong>Inkoop p/m (ex):</strong> € <?= number_format((float)$p['buy_price_monthly_ex_vat'], 2, ',', '.') ?></div>
-                    <div><strong>Verkoop p/m (ex):</strong> € <?= number_format((float)$p['sell_price_monthly_ex_vat'], 2, ',', '.') ?></div>
-                    <div><strong>Overage inkoop (ex)/MB:</strong> € <?= number_format((float)$p['buy_price_overage_per_mb_ex_vat'], 4, ',', '.') ?></div>
-                    <div><strong>Overage advies (ex)/MB:</strong> € <?= number_format((float)$p['sell_price_overage_per_mb_ex_vat'], 4, ',', '.') ?></div>
-                    <div><strong>Setup (ex):</strong> € <?= number_format((float)$p['setup_fee_ex_vat'], 2, ',', '.') ?></div>
-                    <div><strong>Bundel (GB):</strong> <?= e($p['bundle_gb'] ?? '-') ?></div>
-                    <div><strong>Operator:</strong> <?= e($p['network_operator'] ?? '-') ?></div>
+                    <!-- details ... -->
                   </div>
                 </div>
               </div>
@@ -339,8 +315,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     <?php endif; ?>
   </div>
 
+  <!-- Submit -->
   <div class="mt-4">
-    <button type="submit" class="btn btn-primary" id="submitBtn" disabled>Aanmaken (Concept)</button>
+    <button type="submit" class="btn btn-primary" id="submitBtn" disabled>
+      Aanmaken (Concept)
+    </button>
   </div>
 </form>
 
