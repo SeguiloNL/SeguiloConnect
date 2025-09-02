@@ -264,7 +264,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     <?php endif; ?>
   </div>
 
- <div class="mb-4">
+<div class="mb-4">
   <label class="form-label">SIM kaart</label>
 
   <!-- Hele simkaart-sectie als d-block -->
