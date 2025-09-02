@@ -204,7 +204,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 }
 
 // ----- Form weergave -----
-include __DIR__ . '/../views/header.php';
 ?>
 
 <h4>Nieuwe gebruiker</h4>
@@ -373,4 +372,3 @@ include __DIR__ . '/../views/header.php';
   </div>
 </form>
 
-<?php include __DIR__ . '/../views/footer.php'; ?>
