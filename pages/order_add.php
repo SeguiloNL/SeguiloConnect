@@ -264,30 +264,43 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     <?php endif; ?>
   </div>
 
-    <div class="mb-4">
+ <div class="mb-4">
   <label class="form-label">SIM kaart</label>
 
-  <div class="row g-2 align-items-end">
-    <div class="col-sm-6 col-md-4">
-      <label for="simSearch" class="form-label small mb-1">Zoek op cijfers (ICCID/IMSI)</label>
-      <input
-        type="text"
-        inputmode="numeric"
-        pattern="[0-9]*"
-        class="form-control"
-        id="simSearch"
-        placeholder="typ minimaal 3 cijfers…">
-      <div class="form-text">
-        Typ 3+ cijfers. We tonen vrije SIM’s die overeenkomen (ICCID of IMSI).
+  <!-- Hele simkaart-sectie als d-block -->
+  <div class="d-block">
+    <div class="row row-cols-1 row-cols-md-2 g-3 align-items-start">
+      <div class="col">
+        <div class="d-block">
+          <label for="simSearch" class="form-label small mb-2">Zoek op cijfers (ICCID/IMSI)</label>
+          <input
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            class="form-control"
+            id="simSearch"
+            placeholder="typ minimaal 3 cijfers…"
+            aria-describedby="simHelp">
+          <div id="simHelp" class="form-text">
+            Typ 3+ cijfers. We tonen vrije SIM’s die overeenkomen (ICCID of IMSI).
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <!-- Sim-select deel óók expliciet in een d-block -->
+        <div class="d-block">
+          <label for="simSelect" class="form-label small mb-2">Kies een vrije SIM</label>
+          <select class="form-select w-100" name="sim_id" id="simSelect" required disabled>
+            <option value="">— eerst zoeken —</option>
+          </select>
+        </div>
       </div>
     </div>
-    <div class="col-sm-6 col-md-8">
-      <label for="simSelect" class="form-label small mb-1">Kies een vrije SIM</label>
-      <select class="form-select" name="sim_id" id="simSelect" required disabled>
-        <option value="">— eerst zoeken —</option>
-      </select>
-    </div>
+
+    <div id="simHint" class="small text-muted mt-2"></div>
   </div>
+</div>
 
   <div id="simHint" class="small text-muted mt-1"></div>
 </div>
