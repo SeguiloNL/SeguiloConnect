@@ -1,5 +1,7 @@
 <?php
-// pages/system_admin.php — alleen Super-admin
+// views/system_admin.php — Systeembeheer (alleen Super-admin)
+// Wordt gerenderd binnen je layout (header/footer via index.php)
+
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -27,16 +29,25 @@ function column_exists(PDO $pdo, string $table, string $col): bool {
   $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
   return $st ? (bool)$st->fetch(PDO::FETCH_ASSOC) : false;
 }
+function ensure_settings_table(PDO $pdo): void {
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS system_settings (
+      k VARCHAR(64) PRIMARY KEY,
+      v VARCHAR(255) NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  ");
+}
 function get_setting(PDO $pdo, string $key): ?string {
-  $pdo->exec("CREATE TABLE IF NOT EXISTS system_settings (k VARCHAR(64) PRIMARY KEY, v VARCHAR(255) NULL)");
+  ensure_settings_table($pdo);
   $st = $pdo->prepare("SELECT v FROM system_settings WHERE k=?");
   $st->execute([$key]);
   $v = $st->fetchColumn();
   return $v === false ? null : (string)$v;
 }
 function set_setting(PDO $pdo, string $key, ?string $val): void {
-  $pdo->exec("CREATE TABLE IF NOT EXISTS system_settings (k VARCHAR(64) PRIMARY KEY, v VARCHAR(255) NULL)");
-  $st = $pdo->prepare("INSERT INTO system_settings (k,v) VALUES(?,?) ON DUPLICATE KEY UPDATE v=VALUES(v)");
+  ensure_settings_table($pdo);
+  $st = $pdo->prepare("INSERT INTO system_settings (k,v) VALUES(?,?)
+                       ON DUPLICATE KEY UPDATE v=VALUES(v)");
   $st->execute([$key, $val]);
 }
 
@@ -56,10 +67,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
           flash_set('warning','De kolom orders.order_number bestaat niet. Niets gewijzigd.');
           break;
         }
-        // Zet alles op NULL en hernummer op basis van id
         $pdo->beginTransaction();
         $pdo->exec("UPDATE orders SET order_number = NULL");
-        // MySQL user variable voor hernummeren
         $pdo->exec("SET @rn := 0");
         $pdo->exec("UPDATE orders SET order_number = (@rn := @rn + 1) ORDER BY id ASC");
         $pdo->commit();
@@ -72,7 +81,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
           flash_set('warning','Tabel sims bestaat niet.');
           break;
         }
-        // Veiligheid: alleen als er geen orders verwijzen naar sims
         $ordersRef = 0;
         if (table_exists($pdo,'orders') && column_exists($pdo,'orders','sim_id')) {
           $ordersRef = (int)$pdo->query("SELECT COUNT(*) FROM orders WHERE sim_id IS NOT NULL")->fetchColumn();
@@ -82,27 +90,19 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
           break;
         }
 
-        // Hernummeren door kopiëren zonder id-kolom
-        // 1) kolommen ophalen
+        // Hernummer via tijdelijke kopie (FK-veilig)
         $cols = [];
         $stc = $pdo->query("SHOW COLUMNS FROM sims");
         while ($r = $stc->fetch(PDO::FETCH_ASSOC)) { $cols[] = $r['Field']; }
-        if (!in_array('id', $cols, true)) {
-          flash_set('danger','Kolom sims.id niet gevonden.');
-          break;
-        }
+        if (!in_array('id', $cols, true)) { flash_set('danger','Kolom sims.id niet gevonden.'); break; }
         $otherCols = array_values(array_filter($cols, fn($c)=>$c !== 'id'));
-        if (!$otherCols) {
-          flash_set('danger','Geen kolommen om te kopiëren.');
-          break;
-        }
+        if (!$otherCols) { flash_set('danger','Geen kolommen om te kopiëren.'); break; }
         $colList = implode(',', array_map(fn($c)=>"`$c`", $otherCols));
 
         $pdo->beginTransaction();
         $pdo->exec("SET FOREIGN_KEY_CHECKS=0");
         $pdo->exec("CREATE TEMPORARY TABLE tmp_sims AS SELECT $colList FROM sims ORDER BY id ASC");
         $pdo->exec("TRUNCATE TABLE sims");
-        // Insert zonder id -> auto_increment start vanaf 1
         $pdo->exec("INSERT INTO sims ($colList) SELECT $colList FROM tmp_sims");
         $pdo->exec("DROP TEMPORARY TABLE IF EXISTS tmp_sims");
         $pdo->exec("SET FOREIGN_KEY_CHECKS=1");
@@ -113,17 +113,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
       }
 
       case 'delete_all_sims_without_orders': {
-        if (!table_exists($pdo,'sims')) {
-          flash_set('warning','Tabel sims bestaat niet.');
-          break;
-        }
+        if (!table_exists($pdo,'sims')) { flash_set('warning','Tabel sims bestaat niet.'); break; }
         $pdo->beginTransaction();
         if (table_exists($pdo,'orders') && column_exists($pdo,'orders','sim_id')) {
-          // verwijder alleen sims die niet in orders voorkomen
-          $sql = "DELETE s FROM sims s LEFT JOIN orders o ON o.sim_id = s.id WHERE o.id IS NULL";
-          $pdo->exec($sql);
+          $pdo->exec("DELETE s FROM sims s LEFT JOIN orders o ON o.sim_id = s.id WHERE o.id IS NULL");
         } else {
-          // als er überhaupt geen orders-tabel is, dan alles weg
           $pdo->exec("DELETE FROM sims");
         }
         $pdo->commit();
@@ -132,10 +126,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
       }
 
       case 'delete_all_orders_hard': {
-        if (!table_exists($pdo,'orders')) {
-          flash_set('warning','Tabel orders bestaat niet.');
-          break;
-        }
+        if (!table_exists($pdo,'orders')) { flash_set('warning','Tabel orders bestaat niet.'); break; }
         $pdo->beginTransaction();
         $pdo->exec("DELETE FROM orders");
         $pdo->commit();
@@ -143,14 +134,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         break;
       }
 
-      case 'save_settings': {
-        // Ordernummer-prefix opslaan (max 5 tekens)
-        $prefix = trim((string)($_POST['order_prefix'] ?? ''));
-        if (mb_strlen($prefix) > 5) {
+      case 'save_brand_settings': {
+        $orderPrefix = trim((string)($_POST['order_prefix'] ?? ''));
+        $logoUrl     = trim((string)($_POST['brand_logo_url'] ?? ''));
+
+        if (mb_strlen($orderPrefix) > 5) {
           flash_set('warning','Prefix te lang (max 5 tekens).');
         } else {
-          set_setting($pdo, 'order_prefix', $prefix);
-          flash_set('success','Systeeminstellingen opgeslagen.');
+          set_setting($pdo, 'order_prefix', $orderPrefix !== '' ? $orderPrefix : null);
+          set_setting($pdo, 'brand_logo_url', $logoUrl !== '' ? $logoUrl : null);
+          flash_set('success','Huisstijl & instellingen opgeslagen.');
         }
         break;
       }
@@ -168,8 +161,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
 // ---------- huidige instellingen ----------
 $orderPrefix = get_setting($pdo, 'order_prefix') ?? '';
+$brandLogoUrl = get_setting($pdo, 'brand_logo_url') ?? '';
 
-// ---------- pagina ----------
 echo function_exists('flash_output') ? flash_output() : '';
 ?>
 
@@ -186,8 +179,7 @@ echo function_exists('flash_output') ? flash_output() : '';
         <form method="post" class="d-inline me-2">
           <?php if (function_exists('csrf_field')) csrf_field(); ?>
           <input type="hidden" name="action" value="reset_order_numbers">
-          <button class="btn btn-primary"
-                  onclick="return confirm('Alle ordernummers opnieuw instellen?')">
+          <button class="btn btn-primary" onclick="return confirm('Alle ordernummers opnieuw instellen?')">
             Reset alle ordernummers
           </button>
         </form>
@@ -232,25 +224,43 @@ echo function_exists('flash_output') ? flash_output() : '';
     </div>
   </div>
 
-  <!-- Systeeminstellingen -->
+  <!-- Huisstijl & instellingen -->
   <div class="col-12">
     <div class="card">
       <div class="card-body">
-        <h5 class="card-title">Systeeminstellingen</h5>
+        <h5 class="card-title">Huisstijl & instellingen</h5>
+
         <form method="post" class="row g-3">
           <?php if (function_exists('csrf_field')) csrf_field(); ?>
-          <input type="hidden" name="action" value="save_settings">
+          <input type="hidden" name="action" value="save_brand_settings">
 
-          <div class="col-sm-6 col-md-4 col-lg-3">
+          <div class="col-sm-6 col-md-4">
             <label class="form-label">Ordernummer-prefix</label>
-            <input type="text" name="order_prefix" maxlength="5" class="form-control" value="<?= e($orderPrefix) ?>" placeholder="max 5 tekens">
-            <div class="form-text">Bijv. <code>SEGU-</code>. Maximaal 5 tekens.</div>
+            <input type="text" name="order_prefix" maxlength="5" class="form-control"
+                   value="<?= e($orderPrefix) ?>" placeholder="bv. SEGU-">
+            <div class="form-text">Max. 5 tekens. Wordt gebruikt bij tonen/genereren van ordernummers (als je die logica toepast).</div>
           </div>
 
-          <div class="col-12 d-flex gap-2">
-            <button class="btn btn-success">Instellingen opslaan</button>
+          <div class="col-sm-6 col-md-6">
+            <label class="form-label">Logo-URL</label>
+            <input type="url" name="brand_logo_url" class="form-control"
+                   placeholder="https://…/logo.png" value="<?= e($brandLogoUrl) ?>">
+            <div class="form-text">
+              Dit logo wordt linksboven in het menu getoond (zie <code>views/header.php</code>). Gebruik bij voorkeur een transparante PNG/SVG.
+            </div>
+          </div>
+
+          <div class="col-12 d-flex align-items-end gap-3">
+            <button class="btn btn-success">Opslaan</button>
+            <?php if (!empty($brandLogoUrl)): ?>
+              <div class="border rounded p-2">
+                <div class="text-muted small mb-1">Voorbeeld:</div>
+                <img src="<?= e($brandLogoUrl) ?>" alt="Logo preview" style="height:40px; width:auto;">
+              </div>
+            <?php endif; ?>
           </div>
         </form>
+
       </div>
     </div>
   </div>
