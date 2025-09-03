@@ -129,6 +129,10 @@ try {
             include __DIR__ . '/pages/reset_password.php';
             break;
 
+        case 'order_cancel':
+            include __DIR__ . '/pages/order_cancel.php';
+            break;    
+
         case 'ajax_sims_search':
             require __DIR__ . '/pages/ajax_sims_search.php';
             break;
