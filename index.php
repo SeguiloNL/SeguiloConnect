@@ -85,6 +85,10 @@ try {
             include __DIR__ . '/pages/sim_edit.php';
             break;
 
+        case 'sim_delete':
+            require __DIR__ . '/pages/sim_delete.php';
+            break;    
+
         case 'sim_assign':
             include __DIR__ . '/pages/sim_assign.php';
             break;
