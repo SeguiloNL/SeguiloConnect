@@ -81,6 +81,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
           flash_set('warning','Tabel sims bestaat niet.');
           break;
         }
+        // Alleen als er geen orders naar sims verwijzen
         $ordersRef = 0;
         if (table_exists($pdo,'orders') && column_exists($pdo,'orders','sim_id')) {
           $ordersRef = (int)$pdo->query("SELECT COUNT(*) FROM orders WHERE sim_id IS NOT NULL")->fetchColumn();
@@ -141,7 +142,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         if (mb_strlen($orderPrefix) > 5) {
           flash_set('warning','Prefix te lang (max 5 tekens).');
         } else {
-          set_setting($pdo, 'order_prefix', $orderPrefix !== '' ? $orderPrefix : null);
+          set_setting($pdo, 'order_prefix',   $orderPrefix !== '' ? $orderPrefix : null);
           set_setting($pdo, 'brand_logo_url', $logoUrl !== '' ? $logoUrl : null);
           flash_set('success','Huisstijl & instellingen opgeslagen.');
         }
@@ -160,7 +161,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 }
 
 // ---------- huidige instellingen ----------
-$orderPrefix = get_setting($pdo, 'order_prefix') ?? '';
+$orderPrefix  = get_setting($pdo, 'order_prefix') ?? '';
 $brandLogoUrl = get_setting($pdo, 'brand_logo_url') ?? '';
 
 echo function_exists('flash_output') ? flash_output() : '';
@@ -170,7 +171,7 @@ echo function_exists('flash_output') ? flash_output() : '';
 
 <div class="row g-3">
   <!-- Reset tellers -->
-  <div class="col-12 col-lg-6">
+  <div class="col-12 col-xl-6">
     <div class="card h-100">
       <div class="card-body">
         <h5 class="card-title">Reset tellers</h5>
@@ -179,7 +180,8 @@ echo function_exists('flash_output') ? flash_output() : '';
         <form method="post" class="d-inline me-2">
           <?php if (function_exists('csrf_field')) csrf_field(); ?>
           <input type="hidden" name="action" value="reset_order_numbers">
-          <button class="btn btn-primary" onclick="return confirm('Alle ordernummers opnieuw instellen?')">
+          <button class="btn btn-primary"
+                  onclick="return confirm('Alle ordernummers opnieuw instellen?')">
             Reset alle ordernummers
           </button>
         </form>
@@ -197,7 +199,7 @@ echo function_exists('flash_output') ? flash_output() : '';
   </div>
 
   <!-- Verwijderen -->
-  <div class="col-12 col-lg-6">
+  <div class="col-12 col-xl-6">
     <div class="card h-100">
       <div class="card-body">
         <h5 class="card-title">Verwijderen</h5>
@@ -225,8 +227,8 @@ echo function_exists('flash_output') ? flash_output() : '';
   </div>
 
   <!-- Huisstijl & instellingen -->
-  <div class="col-12">
-    <div class="card">
+  <div class="col-12 col-xxl-8">
+    <div class="card h-100">
       <div class="card-body">
         <h5 class="card-title">Huisstijl & instellingen</h5>
 
@@ -238,7 +240,7 @@ echo function_exists('flash_output') ? flash_output() : '';
             <label class="form-label">Ordernummer-prefix</label>
             <input type="text" name="order_prefix" maxlength="5" class="form-control"
                    value="<?= e($orderPrefix) ?>" placeholder="bv. SEGU-">
-            <div class="form-text">Max. 5 tekens. Wordt gebruikt bij tonen/genereren van ordernummers (als je die logica toepast).</div>
+            <div class="form-text">Max. 5 tekens. Te gebruiken bij tonen/genereren van ordernummers.</div>
           </div>
 
           <div class="col-sm-6 col-md-6">
@@ -257,22 +259,25 @@ echo function_exists('flash_output') ? flash_output() : '';
                 <div class="text-muted small mb-1">Voorbeeld:</div>
                 <img src="<?= e($brandLogoUrl) ?>" alt="Logo preview" style="height:40px; width:auto;">
               </div>
-
-          <div class="col-12 col-lg-6">
-            <div class="card h-100">
-                <div class="card-body">
-              <h5 class="card-title">Systeemgebruikers</h5>
-              <p class="text-muted">Beheer accounts met rol <code>super_admin</code>.</p>
-              <a class="btn btn-outline-primary" href="index.php?route=system_users">
-                    Open beheer Systeemgebruikers
-              </a>
-                </div>
-              </div>
-            </div>  
             <?php endif; ?>
           </div>
         </form>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- Systeemgebruikers -->
+  <div class="col-12 col-xxl-4">
+    <div class="card h-100">
+      <div class="card-body d-flex flex-column">
+        <h5 class="card-title">Systeemgebruikers</h5>
+        <p class="text-muted">Beheer accounts met rol <code>super_admin</code>.</p>
+        <div class="mt-auto">
+          <a class="btn btn-outline-primary" href="index.php?route=system_users">
+            Open beheer Systeemgebruikers
+          </a>
+        </div>
       </div>
     </div>
   </div>
