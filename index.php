@@ -22,6 +22,7 @@ $earlyRoutes = [
     'plan_delete',
     'order_delete',
     'user_delete',
+    'profile'
 ];
 
 if ($route && in_array($route, $earlyRoutes, true)) {
@@ -127,10 +128,6 @@ try {
 
         case 'reset_password':
             include __DIR__ . '/pages/reset_password.php';
-            break;
-
-        case 'whoami':
-            include __DIR__ . '/pages/whoami.php';
             break;
 
         case 'ajax_sims_search':
