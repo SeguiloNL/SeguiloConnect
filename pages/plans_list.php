@@ -1,238 +1,217 @@
 <?php
-// pages/plans_list.php — robuust, met eigen PDO, zoek, badges en acties
+// pages/plans_list.php — Overzicht abonnementen (alleen Super-admin)
 require_once __DIR__ . '/../helpers.php';
-
-if (!function_exists('e')) { function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); } }
-
 app_session_start();
+
 $me = auth_user();
 if (!$me) { header('Location: index.php?route=login'); exit; }
 
-// Alleen Super-admin
-$role = $me['role'] ?? '';
+$role    = $me['role'] ?? '';
 $isSuper = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
+
 if (!$isSuper) {
-    http_response_code(403);
-    echo '<div class="alert alert-danger mt-3">Geen toegang.</div>';
-    return;
+  echo '<div class="alert alert-danger">Alleen Super-admin mag deze pagina gebruiken.</div>';
+  return;
 }
 
-/* ===== PDO bootstrap ===== */
-function get_pdo(): PDO {
-    if (isset($GLOBALS['pdo']) && $GLOBALS['pdo'] instanceof PDO) return $GLOBALS['pdo'];
-
-    $candidates = [
-        __DIR__ . '/../db.php',
-        __DIR__ . '/../includes/db.php',
-        __DIR__ . '/../config/db.php',
-    ];
-    foreach ($candidates as $f) {
-        if (is_file($f)) {
-            require_once $f;
-            if (isset($GLOBALS['pdo']) && $GLOBALS['pdo'] instanceof PDO) return $GLOBALS['pdo'];
-        }
-    }
-
-    $cfg = app_config();
-    $db  = $cfg['db'] ?? [];
-    $dsn = $db['dsn'] ?? null;
-
-    if ($dsn) {
-        $pdo = new PDO($dsn, $db['user'] ?? null, $db['pass'] ?? null, [
-            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES   => false,
-        ]);
-    } else {
-        $host    = $db['host'] ?? 'localhost';
-        $name    = $db['name'] ?? $db['database'] ?? '';
-        $user    = $db['user'] ?? $db['username'] ?? '';
-        $pass    = $db['pass'] ?? $db['password'] ?? '';
-        $charset = $db['charset'] ?? 'utf8mb4';
-        if ($name === '') throw new RuntimeException('DB-naam ontbreekt in config');
-        $pdo = new PDO("mysql:host={$host};dbname={$name};charset={$charset}", $user, $pass, [
-            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES   => false,
-        ]);
-    }
-    return $GLOBALS['pdo'] = $pdo;
-}
-$pdo = get_pdo();
-
-/* ===== helpers ===== */
-function column_exists(PDO $pdo, string $table, string $column): bool {
-    $q = $pdo->quote($column);
-    $res = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
-    return $res ? (bool)$res->fetch(PDO::FETCH_ASSOC) : false;
+// DB
+try { $pdo = db(); }
+catch (Throwable $e) {
+  echo '<div class="alert alert-danger">DB niet beschikbaar: ' . e($e->getMessage()) . '</div>';
+  return;
 }
 
-/* ===== filters & paginatie ===== */
-$q     = trim((string)($_GET['q'] ?? ''));
-$per   = (int)($_GET['per'] ?? 25); if (!in_array($per,[25,50,100],true)) $per = 25;
-$page  = max(1, (int)($_GET['page'] ?? 1));
-$off   = ($page-1)*$per;
+// Paginering
+$perPage = (int)($_GET['per_page'] ?? 25);
+if (!in_array($perPage, [25,50,100], true)) $perPage = 25;
+$page    = max(1, (int)($_GET['page'] ?? 1));
+$offset  = ($page - 1) * $perPage;
 
-/* ===== dynamische select ===== */
-$has = [
-  'description'                      => column_exists($pdo,'plans','description'),
-  'buy_price_monthly_ex_vat'         => column_exists($pdo,'plans','buy_price_monthly_ex_vat'),
-  'sell_price_monthly_ex_vat'        => column_exists($pdo,'plans','sell_price_monthly_ex_vat'),
-  'buy_price_overage_per_mb_ex_vat'  => column_exists($pdo,'plans','buy_price_overage_per_mb_ex_vat'),
-  'sell_price_overage_per_mb_ex_vat' => column_exists($pdo,'plans','sell_price_overage_per_mb_ex_vat'),
-  'setup_fee_ex_vat'                 => column_exists($pdo,'plans','setup_fee_ex_vat'),
-  'bundle_gb'                        => column_exists($pdo,'plans','bundle_gb'),
-  'network_operator'                 => column_exists($pdo,'plans','network_operator'),
-  'is_active'                        => column_exists($pdo,'plans','is_active'),
-];
-
-$selectCols = ['p.id','p.name','p.created_at'];
-foreach ($has as $col=>$exists) {
-    if ($exists) $selectCols[] = "p.`$col`";
-}
-$select = implode(', ', $selectCols);
-
-/* ===== WHERE + params (alleen named placeholders) ===== */
-$where = [];
-$params = [];
-if ($q !== '') {
-    $searchParts = ["p.`name` LIKE :q"];
-    if ($has['description'])       $searchParts[] = "p.`description` LIKE :q";
-    if ($has['network_operator'])  $searchParts[] = "p.`network_operator` LIKE :q";
-    $where[] = '(' . implode(' OR ', $searchParts) . ')';
-    $params[':q'] = '%'.$q.'%';
-}
-$whereSql = $where ? ('WHERE '.implode(' AND ',$where)) : '';
-
-/* ===== total ===== */
-$total = 0;
-$err = '';
+// Tellen
 try {
-    $st = $pdo->prepare("SELECT COUNT(*) FROM `plans` p $whereSql");
-    foreach ($params as $k=>$v) $st->bindValue($k,$v,PDO::PARAM_STR);
-    $st->execute();
-    $total = (int)$st->fetchColumn();
+  $total = (int)$pdo->query("SELECT COUNT(*) FROM plans")->fetchColumn();
 } catch (Throwable $e) {
-    $err = 'Laden mislukt: ' . $e->getMessage();
+  echo '<div class="alert alert-danger">Tellen mislukt: ' . e($e->getMessage()) . '</div>';
+  return;
+}
+$totalPages = max(1, (int)ceil($total / $perPage));
+
+// Ophalen
+try {
+  $sql = "SELECT
+            id,
+            name,
+            buy_price_monthly_ex_vat,
+            sell_price_monthly_ex_vat,
+            buy_price_overage_per_mb_ex_vat,
+            sell_price_overage_per_mb_ex_vat,
+            setup_fee_ex_vat,
+            bundle_gb,
+            network_operator,
+            is_active
+          FROM plans
+          ORDER BY name ASC, id ASC
+          LIMIT $perPage OFFSET $offset";
+  $st = $pdo->prepare($sql);
+  $st->execute();
+  $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+  echo '<div class="alert alert-danger">Laden mislukt: ' . e($e->getMessage()) . '</div>';
+  return;
 }
 
-/* ===== fetch rows ===== */
-$rows = [];
-if (!$err) {
-    try {
-        $sql = "SELECT $select FROM `plans` p $whereSql ORDER BY p.id DESC LIMIT :lim OFFSET :off";
-        $st = $pdo->prepare($sql);
-        foreach ($params as $k=>$v) $st->bindValue($k,$v,PDO::PARAM_STR);
-        $st->bindValue(':lim', $per, PDO::PARAM_INT);
-        $st->bindValue(':off', $off, PDO::PARAM_INT);
-        $st->execute();
-        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
-    } catch (Throwable $e) {
-        $err = 'Laden mislukt: ' . $e->getMessage();
-    }
+// Helpers
+function money_or_dash($v): string {
+  if ($v === null || $v === '' ) return '—';
+  $num = (float)$v;
+  return '€ ' . number_format($num, 2, ',', '.');
+}
+function num_or_dash($v): string {
+  if ($v === null || $v === '' ) return '—';
+  if (is_numeric($v)) {
+    // toon zonder trailing .00 als integer
+    if ((float)$v == (int)$v) return (string)(int)$v;
+    return str_replace('.', ',', (string)$v);
+  }
+  return e((string)$v);
+}
+function plans_list_url_keep(array $extra): string {
+  $base = 'index.php?route=plans_list';
+  $qs = array_merge($_GET, $extra);
+  return $base . '&' . http_build_query($qs);
 }
 
-/* ===== UI ===== */
+echo function_exists('flash_output') ? flash_output() : '';
 ?>
-<h3>Abonnementen</h3>
 
-<?php if ($err): ?>
-  <div class="alert alert-danger"><?= e($err) ?></div>
-<?php endif; ?>
-
-<div class="mb-3">
-  <form class="row g-2" method="get" action="index.php">
-    <input type="hidden" name="route" value="plans_list">
-    <div class="col-md-5">
-      <input type="text" class="form-control" name="q" value="<?= e($q) ?>" placeholder="Zoek op naam / operator / omschrijving">
-    </div>
-    <div class="col-md-2">
-      <select name="per" class="form-select">
-        <option value="25"  <?= $per===25?'selected':'' ?>>25 per pagina</option>
-        <option value="50"  <?= $per===50?'selected':'' ?>>50 per pagina</option>
-        <option value="100" <?= $per===100?'selected':'' ?>>100 per pagina</option>
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+  <h4>Abonnementen</h4>
+  <div class="d-flex align-items-center gap-2">
+    <!-- Per pagina -->
+    <form method="get" class="d-flex align-items-center gap-2">
+      <input type="hidden" name="route" value="plans_list">
+      <label class="form-label m-0">Per pagina</label>
+      <select name="per_page" class="form-select form-select-sm" onchange="this.form.submit()">
+        <?php foreach ([25,50,100] as $opt): ?>
+          <option value="<?= $opt ?>" <?= $perPage === $opt ? 'selected' : '' ?>><?= $opt ?></option>
+        <?php endforeach; ?>
       </select>
-    </div>
-    <div class="col-md-5 d-flex gap-2">
-      <button class="btn btn-primary">Filter</button>
-      <a class="btn btn-outline-secondary" href="index.php?route=plans_list">Reset</a>
-      <a class="btn btn-success ms-auto" href="index.php?route=plan_add">Nieuw abonnement</a>
-    </div>
-  </form>
+    </form>
+
+    <!-- Nieuw Abonnement -->
+    <a href="/plan/plan_add.php" class="btn btn-success">
+      <i class="bi bi-plus-lg"></i> Nieuw Abonnement
+    </a>
+  </div>
 </div>
 
-<div class="table-responsive">
-  <table class="table table-sm table-hover align-middle">
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Naam</th>
-        <?php if ($has['buy_price_monthly_ex_vat']): ?><th>Inkoopprijs (ex/maand)</th><?php endif; ?>
-        <?php if ($has['sell_price_monthly_ex_vat']): ?><th>Verkoopprijs (ex/maand)</th><?php endif; ?>
-        <?php if ($has['buy_price_overage_per_mb_ex_vat']): ?><th>Inkoop buiten bundel /MB (ex)</th><?php endif; ?>
-        <?php if ($has['sell_price_overage_per_mb_ex_vat']): ?><th>Advies buiten bundel /MB (ex)</th><?php endif; ?>
-        <?php if ($has['setup_fee_ex_vat']): ?><th>Setup (ex)</th><?php endif; ?>
-        <?php if ($has['bundle_gb']): ?><th>Bundel (GB)</th><?php endif; ?>
-        <?php if ($has['network_operator']): ?><th>Netwerk operator</th><?php endif; ?>
-        <?php if ($has['is_active']): ?><th>Status</th><?php endif; ?>
-        <th>Acties</th>
-      </tr>
-    </thead>
-    <tbody>
-    <?php if (!$rows): ?>
-      <tr><td colspan="20" class="text-center text-muted">Geen abonnementen gevonden.</td></tr>
+<div class="card">
+  <div class="card-body">
+    <?php if ($total === 0): ?>
+      <div class="text-muted">Geen abonnementen gevonden.</div>
     <?php else: ?>
-      <?php foreach ($rows as $r): ?>
-        <tr>
-          <td><?= (int)$r['id'] ?></td>
-          <td>
-            <div class="fw-semibold"><?= e($r['name']) ?></div>
-            <?php if ($has['description'] && !empty($r['description'])): ?>
-              <div class="small text-muted"><?= e(mb_strimwidth($r['description'],0,120,'…','UTF-8')) ?></div>
-            <?php endif; ?>
-          </td>
-          <?php if ($has['buy_price_monthly_ex_vat']): ?>
-            <td><?= e(number_format((float)($r['buy_price_monthly_ex_vat'] ?? 0), 2, ',', '.')) ?></td>
-          <?php endif; ?>
-          <?php if ($has['sell_price_monthly_ex_vat']): ?>
-            <td><?= e(number_format((float)($r['sell_price_monthly_ex_vat'] ?? 0), 2, ',', '.')) ?></td>
-          <?php endif; ?>
-          <?php if ($has['buy_price_overage_per_mb_ex_vat']): ?>
-            <td><?= e(number_format((float)($r['buy_price_overage_per_mb_ex_vat'] ?? 0), 4, ',', '.')) ?></td>
-          <?php endif; ?>
-          <?php if ($has['sell_price_overage_per_mb_ex_vat']): ?>
-            <td><?= e(number_format((float)($r['sell_price_overage_per_mb_ex_vat'] ?? 0), 4, ',', '.')) ?></td>
-          <?php endif; ?>
-          <?php if ($has['setup_fee_ex_vat']): ?>
-            <td><?= e(number_format((float)($r['setup_fee_ex_vat'] ?? 0), 2, ',', '.')) ?></td>
-          <?php endif; ?>
-          <?php if ($has['bundle_gb']): ?>
-            <td><?= e((string)($r['bundle_gb'] ?? '')) ?></td>
-          <?php endif; ?>
-          <?php if ($has['network_operator']): ?>
-            <td><?= e((string)($r['network_operator'] ?? '')) ?></td>
-          <?php endif; ?>
-          <?php if ($has['is_active']): ?>
-            <td>
-              <?php $active = (int)($r['is_active'] ?? 0) === 1; ?>
-              <span class="badge <?= $active ? 'text-bg-success':'text-bg-secondary' ?>">
-                <?= $active ? 'actief' : 'inactief' ?>
-              </span>
-            </td>
-          <?php endif; ?>
-          <td class="text-nowrap">
-            <a class="btn btn-sm btn-outline-primary" href="index.php?route=plan_edit&id=<?= (int)$r['id'] ?>">Bewerken</a>
-            <a class="btn btn-sm btn-outline-secondary" href="index.php?route=plan_duplicate&id=<?= (int)$r['id'] ?>">Dupliceren</a>
-            <form method="post" action="index.php?route=plan_delete&id=<?= (int)$r['id'] ?>" class="d-inline" onsubmit="return confirm('Weet je zeker dat je dit abonnement wilt verwijderen?')">
-              <?php csrf_field(); ?>
-              <button class="btn btn-sm btn-outline-danger">Verwijderen</button>
-            </form>
-          </td>
-        </tr>
-      <?php endforeach; ?>
-    <?php endif; ?>
-    </tbody>
-  </table>
-</div>
+      <div class="table-responsive">
+        <table class="table table-striped align-middle">
+          <thead>
+            <tr>
+              <th style="width:80px;">ID</th>
+              <th>Naam</th>
+              <th>Inkoopprijs (ex/maand)</th>
+              <th>Verkoopprijs (ex/maand)</th>
+              <th>Inkoop buiten bundel /MB (ex)</th>
+              <th>Advies buiten bundel /MB (ex)</th>
+              <th>Setup (ex)</th>
+              <th>Bundel (GB)</th>
+              <th>Netwerk operator</th>
+              <th>Status</th>
+              <th class="text-end" style="width:140px;">Acties</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($rows as $r): ?>
+              <tr>
+                <td>#<?= (int)$r['id'] ?></td>
+                <td><?= e($r['name'] ?? '—') ?></td>
+                <td><?= money_or_dash($r['buy_price_monthly_ex_vat']) ?></td>
+                <td><?= money_or_dash($r['sell_price_monthly_ex_vat']) ?></td>
+                <td><?= money_or_dash($r['buy_price_overage_per_mb_ex_vat']) ?></td>
+                <td><?= money_or_dash($r['sell_price_overage_per_mb_ex_vat']) ?></td>
+                <td><?= money_or_dash($r['setup_fee_ex_vat']) ?></td>
+                <td><?= num_or_dash($r['bundle_gb']) ?></td>
+                <td><?= e($r['network_operator'] ?? '—') ?></td>
+                <td>
+                  <?php if ((int)($r['is_active'] ?? 0) === 1): ?>
+                    <span class="badge bg-success">Actief</span>
+                  <?php else: ?>
+                    <span class="badge bg-secondary">Inactief</span>
+                  <?php endif; ?>
+                </td>
+                <td class="text-end">
+                  <!-- Bewerken -->
+                  <a class="btn btn-sm btn-outline-primary" title="Bewerken"
+                     href="index.php?route=plan_edit&id=<?= (int)$r['id'] ?>">
+                    <i class="bi bi-pencil"></i>
+                  </a>
+                  <!-- Dupliceren -->
+                  <a class="btn btn-sm btn-outline-secondary" title="Dupliceren"
+                     href="index.php?route=plan_duplicate&id=<?= (int)$r['id'] ?>">
+                    <i class="bi bi-files"></i>
+                  </a>
+                  <!-- Verwijderen -->
+                  <form method="post" action="index.php?route=plan_delete&id=<?= (int)$r['id'] ?>" class="d-inline"
+                        onsubmit="return confirm('Abonnement verwijderen? Deze actie kan niet ongedaan worden gemaakt.');">
+                    <?php if (function_exists('csrf_field')) csrf_field(); ?>
+                    <button class="btn btn-sm btn-outline-danger" title="Verwijderen">
+                      <i class="bi bi-trash"></i>
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
 
-<?php render_pagination($total, $per, $page, 'plans_list', ['q'=>$q, 'per'=>$per]); ?>
+      <!-- Paginering -->
+      <div class="d-flex justify-content-between align-items-center mt-3 flex-wrap gap-2">
+        <div class="text-muted small">
+          Totaal: <?= (int)$total ?> · Pagina <?= (int)$page ?> van <?= (int)$totalPages ?>
+        </div>
+        <nav>
+          <ul class="pagination pagination-sm mb-0">
+            <?php
+              $prevDisabled = ($page <= 1) ? ' disabled' : '';
+              $nextDisabled = ($page >= $totalPages) ? ' disabled' : '';
+              $baseQs = $_GET;
+              $baseQs['route'] = 'plans_list';
+              $baseQs['per_page'] = $perPage;
+            ?>
+            <li class="page-item<?= $prevDisabled ?>">
+              <a class="page-link" href="<?= $page > 1 ? ('index.php?'.http_build_query(array_merge($baseQs,['page'=>$page-1]))) : '#' ?>">Vorige</a>
+            </li>
+            <?php
+              $window = 2;
+              $start = max(1, $page - $window);
+              $end   = min($totalPages, $page + $window);
+              if ($start > 1) {
+                echo '<li class="page-item"><a class="page-link" href="index.php?'.http_build_query(array_merge($baseQs,['page'=>1])).'">1</a></li>';
+                if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+              }
+              for ($p=$start; $p<=$end; $p++) {
+                $active = ($p === $page) ? ' active' : '';
+                echo '<li class="page-item'.$active.'"><a class="page-link" href="index.php?'.http_build_query(array_merge($baseQs,['page'=>$p])).'">'.$p.'</a></li>';
+              }
+              if ($end < $totalPages) {
+                if ($end < $totalPages-1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                echo '<li class="page-item"><a class="page-link" href="index.php?'.http_build_query(array_merge($baseQs,['page'=>$totalPages])).'">'.$totalPages.'</a></li>';
+              }
+            ?>
+            <li class="page-item<?= $nextDisabled ?>">
+              <a class="page-link" href="<?= $page < $totalPages ? ('index.php?'.http_build_query(array_merge($baseQs,['page'=>$page+1]))) : '#' ?>">Volgende</a>
+            </li>
+          </ul>
+        </nav>
+      </div>
+    <?php endif; ?>
+  </div>
+</div>
