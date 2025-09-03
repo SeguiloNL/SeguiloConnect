@@ -217,12 +217,7 @@ echo function_exists('flash_output') ? flash_output() : '';
         <?php endforeach; ?>
       </select>
       <input type="hidden" name="page" value="1">
-    </form>
-
-    <!-- Gevraagde groene knop -->
-    <a href="index.php?route=order_add" class="btn btn-success">
-      <i class="bi bi-plus-lg"></i> Nieuwe bestelling
-    </a>
+    </form>    
   </div>
 </div>
 
