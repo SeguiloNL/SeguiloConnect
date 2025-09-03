@@ -22,7 +22,6 @@ $earlyRoutes = [
     'plan_delete',
     'order_delete',
     'user_delete',
-    'profile'
 ];
 
 if ($route && in_array($route, $earlyRoutes, true)) {
