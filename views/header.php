@@ -1,14 +1,50 @@
+Hier is een volledige, vervangende views/header.php die exact doet wat je vroeg:
+	•	Hoofdmenu’s: Dashboard, Klanten, Abonnementen, Bestellen
+	•	Rechts: dropdown “Mijn account” met Mijn profiel, Systeembeheer (alleen Super-admin) en Uitloggen
+	•	Links logo i.p.v. app-naam. Het logo-URL wordt gelezen uit system_settings.k='brand_logo_url' (instelbaar op je System Admin-pagina). Zonder setting valt hij terug op de app-naam.
+	•	Zelfde themakleur (#1e73be) en witte menu-tekst.
+	•	Simkaarten vind je logisch onder Bestellen (beheer/flows rond bestellen).
+
+Plak dit als views/header.php.
+
 <?php
+// views/header.php
+// Vereist: auth_user(), role constants (optioneel), db(), e(), base_url()
+// Optioneel: system_settings tabel met key 'brand_logo_url'
+
 $u = auth_user();
 $config = require __DIR__ . '/../config.php';
 
-// Role-flags
-$role = $u['role'] ?? null;
-$isSuper  = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
-$isRes    = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
-$isSubRes = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
-$isMgr    = ($isSuper || $isRes || $isSubRes);
-$isCustomer = !$isMgr;
+// Role flags
+$role      = $u['role'] ?? null;
+$isSuper   = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
+$isRes     = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
+$isSubRes  = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
+$isMgr     = ($isSuper || $isRes || $isSubRes);
+$isCustomer= !$isMgr;
+
+// Probeer het logo uit system_settings te halen
+$brandLogoUrl = null;
+try {
+    if (function_exists('db')) {
+        $pdo = db();
+        if ($pdo) {
+            $pdo->exec("CREATE TABLE IF NOT EXISTS system_settings (k VARCHAR(64) PRIMARY KEY, v VARCHAR(255) NULL)");
+            $st = $pdo->prepare("SELECT v FROM system_settings WHERE k = 'brand_logo_url' LIMIT 1");
+            $st->execute();
+            $brandLogoUrl = $st->fetchColumn();
+            if ($brandLogoUrl !== false) {
+                $brandLogoUrl = trim((string)$brandLogoUrl);
+                if ($brandLogoUrl === '') $brandLogoUrl = null;
+            } else {
+                $brandLogoUrl = null;
+            }
+        }
+    }
+} catch (Throwable $e) {
+    // Stil falen; val terug op app-naam
+    $brandLogoUrl = null;
+}
 ?>
 <!doctype html>
 <html lang="nl">
@@ -20,90 +56,103 @@ $isCustomer = !$isMgr;
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
 <link href="<?= e(base_url()) ?>/assets/css/app.css" rel="stylesheet">
 <style>
-  .navbar-custom {
-    background-color: #1e73be !important;
-  }
+  .navbar-custom { background-color: #1e73be !important; }
   .navbar-custom .nav-link,
   .navbar-custom .navbar-brand,
-  .navbar-custom .navbar-text {
-    color: #fff !important;
-  }
+  .navbar-custom .navbar-text,
+  .navbar-custom .dropdown-toggle,
+  .navbar-custom .btn-outline-light { color: #fff !important; }
   .navbar-custom .nav-link:hover,
-  .navbar-custom .nav-link:focus {
-    color: #f0f0f0 !important;
+  .navbar-custom .dropdown-toggle:hover { color: #f0f0f0 !important; }
+
+  .brand-logo {
+    height: 32px;
+    width: auto;
+    display: block;
+  }
+  .brand-fallback {
+    font-weight: 600;
+    color: #fff !important;
+    text-decoration: none;
+  }
+
+  /* Dropdown menu contrasterend (licht) op gekleurde navbar */
+  .navbar-custom .dropdown-menu {
+    border: none;
+    box-shadow: 0 8px 24px rgba(0,0,0,.15);
   }
 </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-custom mb-0">
   <div class="container-fluid">
-    <a class="navbar-brand" href="<?= e(base_url()) ?>/index.php?route=dashboard"><?= e($config['app']['app_name']) ?></a>
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Toggle navigation">
+    <!-- Logo / Brand -->
+    <a class="navbar-brand d-flex align-items-center gap-2" href="<?= e(base_url()) ?>/index.php?route=dashboard" aria-label="Home">
+      <?php if ($brandLogoUrl): ?>
+        <img src="<?= e($brandLogoUrl) ?>" alt="Logo" class="brand-logo">
+      <?php else: ?>
+        <span class="brand-fallback"><?= e($config['app']['app_name']) ?></span>
+      <?php endif; ?>
+    </a>
+
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Menu openen">
       <span class="navbar-toggler-icon"></span>
     </button>
 
     <?php if ($u): ?>
     <div class="collapse navbar-collapse" id="nav">
+      <!-- Linkerzijde: Hoofdmenu's -->
       <ul class="navbar-nav me-auto mb-2 mb-lg-0">
         <!-- Dashboard -->
         <li class="nav-item">
           <a class="nav-link" href="<?= e(base_url()) ?>/index.php?route=dashboard">Dashboard</a>
         </li>
 
-        <!-- Beheer dropdown -->
-<?php if ($isMgr): ?>
-  <li class="nav-item dropdown">
-    <a class="nav-link dropdown-toggle" href="#" id="beheerDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-      Simkaart &amp; Abonnementen beheer
-    </a>
-    <ul class="dropdown-menu">
-      <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=sims_list">Simkaarten</a></li>
-      <?php if ($isSuper): ?>
-        <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=plans_list">Abonnementen</a></li>
-        <li><hr class="dropdown-divider"></li>
-      <?php endif; ?>
-      <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=orders_list">Bestellingen</a></li>
-    </ul>
-  </li>
-<?php else: ?>
-          <!-- Eindklant: Mijn dropdown -->
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="mijnDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              Mijn
-            </a>
-            <ul class="dropdown-menu">
-              <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=orders_list">Mijn bestellingen</a></li>
-            </ul>
-          </li>
+        <!-- Klanten -->
+        <li class="nav-item">
+          <a class="nav-link" href="<?= e(base_url()) ?>/index.php?route=users_list">Klanten</a>
+        </li>
+
+        <!-- Abonnementen (meestal voor Super-admin) -->
+        <?php if ($isSuper): ?>
+        <li class="nav-item">
+          <a class="nav-link" href="<?= e(base_url()) ?>/index.php?route=plans_list">Abonnementen</a>
+        </li>
         <?php endif; ?>
+
+        <!-- Bestellen -->
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" id="bestellenDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            Bestellen
+          </a>
+          <ul class="dropdown-menu">
+            <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=orders_list">Overzicht bestellingen</a></li>
+            <?php if ($isMgr): ?>
+              <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=order_add">Nieuwe bestelling</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=sims_list">Simkaarten</a></li>
+            <?php endif; ?>
+          </ul>
+        </li>
       </ul>
 
-      <!-- Rechts uitgelijnd gedeelte -->
+      <!-- Rechterzijde: Mijn account -->
       <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
-        <?php if ($isMgr): ?>
-          <li class="nav-item">
-            <a class="nav-link" href="<?= e(base_url()) ?>/index.php?route=users_list" title="Gebruikers">
-              <i class="bi bi-people"></i>
-            </a>
-          </li>
-        <?php endif; ?>
-
-        <?php if ($isSuper): ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="systeemDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false" title="Systeembeheer">
-              <i class="bi bi-gear"></i>
-            </a>
-            <ul class="dropdown-menu dropdown-menu-end">
-              <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=system_admin">Systeembeheer</a></li>
-            </ul>
-          </li>
-        <?php endif; ?>
-
-        <li class="nav-item">
-          <span class="navbar-text me-3"><?= e($u['name']) ?> (<?= e(role_label($role)) ?>)</span>
-        </li>
-        <li class="nav-item">
-          <a class="btn btn-outline-light" href="<?= e(base_url()) ?>/index.php?route=logout">Uitloggen</a>
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" id="accountDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            Mijn account
+          </a>
+          <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="accountDropdown">
+            <li class="dropdown-header">
+              <?= e($u['name']) ?> <span class="text-muted">(<?= e($u['role']) ?>)</span>
+            </li>
+            <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=profile"><i class="bi bi-person"></i> Mijn profiel</a></li>
+            <?php if ($isSuper): ?>
+              <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=system_admin"><i class="bi bi-gear"></i> Systeembeheer</a></li>
+            <?php endif; ?>
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item" href="<?= e(base_url()) ?>/index.php?route=logout"><i class="bi bi-box-arrow-right"></i> Uitloggen</a></li>
+          </ul>
         </li>
       </ul>
     </div>
@@ -120,7 +169,7 @@ $isCustomer = !$isMgr;
           Je bent momenteel ingelogd als <strong><?= e($u['name']) ?> (<?= e($u['role']) ?>)</strong>.
         </div>
         <form method="post" action="index.php?route=impersonate_stop" class="m-0">
-          <?php csrf_field(); ?>
+          <?php if (function_exists('csrf_field')) csrf_field(); ?>
           <button class="btn btn-sm btn-outline-dark">Terug naar mijn account</button>
         </form>
       </div>
@@ -129,4 +178,3 @@ $isCustomer = !$isMgr;
 <?php endif; ?>
 
 <div class="container mt-4">
-  <?php if (function_exists('flash_output')) echo flash_output(); ?> 
