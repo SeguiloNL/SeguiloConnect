@@ -1,5 +1,16 @@
+Hier is een volledige, schone pages/user_add.php die:
+	•	Rollen en rechten respecteert (super → reseller/sub/klant; reseller → sub/klant; sub → klant).
+	•	Parent-selectie netjes beperkt tot je eigen boom (sub-reseller → parent = zichzelf).
+	•	Aansluitadres ondersteunt met fallback naar service_* kolommen als connect_* niet bestaan.
+	•	Alleen kolommen wegschrijft die in je database bestaan (voorkomt 1054-fouten).
+	•	CSRF + nette validaties + flash + redirect gebruikt.
+	•	Geen header/footer include (die zitten in index.php).
+
+Plak dit bestand als pages/user_add.php.
+
 <?php
-// pages/user_add.php — gebruiker toevoegen met Administratief + Aansluitadres
+// pages/user_add.php — gebruiker toevoegen met Administratief + Aansluitadres (connect_* of service_*)
+// Layout (header/footer) wordt in index.php gedaan.
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -44,7 +55,7 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
   return $ids;
 }
 
-// detecteer optionele kolommen (adresvelden)
+// detecteer optionele kolommen
 $hasParent           = column_exists($pdo,'users','parent_user_id');
 $hasIsActive         = column_exists($pdo,'users','is_active');
 $hasPhone            = column_exists($pdo,'users','phone');
@@ -54,28 +65,27 @@ $hasAdminAddress     = column_exists($pdo,'users','admin_address');
 $hasAdminPostcode    = column_exists($pdo,'users','admin_postcode');
 $hasAdminCity        = column_exists($pdo,'users','admin_city');
 
-$hasConnectContact   = column_exists($pdo,'users','connect_contact');
-$hasConnectAddress   = column_exists($pdo,'users','connect_address');
-$hasConnectPostcode  = column_exists($pdo,'users','connect_postcode');
-$hasConnectCity      = column_exists($pdo,'users','connect_city');
+// Aansluitadres: prefer connect_*, val terug op service_* (zoals in jouw SQL dump)
+$connectCols = [
+  'contact'  => column_exists($pdo,'users','connect_contact')  ? 'connect_contact'  : (column_exists($pdo,'users','service_contact')  ? 'service_contact'  : null),
+  'address'  => column_exists($pdo,'users','connect_address')  ? 'connect_address'  : (column_exists($pdo,'users','service_address')  ? 'service_address'  : null),
+  'postcode' => column_exists($pdo,'users','connect_postcode') ? 'connect_postcode' : (column_exists($pdo,'users','service_postcode') ? 'service_postcode' : null),
+  'city'     => column_exists($pdo,'users','connect_city')     ? 'connect_city'     : (column_exists($pdo,'users','service_city')     ? 'service_city'     : null),
+];
 
 // Toegestane rollen per aanmaker
-$allRoles = ['super_admin','reseller','sub_reseller','customer'];
 if ($isSuper) {
-  $allowedNewRoles = ['reseller','sub_reseller','customer']; // super kan iedereen aanmaken behalve nóg een super? (pas desgewenst aan)
+  // conform eerdere wens: super-admin mag reseller, sub-reseller, customer aanmaken
+  $allowedNewRoles = ['reseller','sub_reseller','customer'];
 } elseif ($isRes) {
   $allowedNewRoles = ['sub_reseller','customer'];
 } else { // sub_reseller
   $allowedNewRoles = ['customer'];
 }
 
-// Parent-selectie:
-// - super: mag elke parent kiezen (of geen)
-// - reseller: parent binnen eigen boom (inclusief zichzelf)
-// - sub_reseller: parent is zichzelf (voor customers); we tonen dropdown met alleen zichzelf, of verbergen hem.
+// Parent-selectie (opties):
 function fetch_parent_options(PDO $pdo, array $me, bool $isSuper, bool $isRes, bool $isSubRes): array {
   if (!column_exists($pdo,'users','parent_user_id')) {
-    // geen hiërarchie → alleen jezelf tonen (praktisch)
     return [ ['id'=>(int)$me['id'], 'name'=>$me['name'] ?? '—', 'role'=>$me['role'] ?? null] ];
   }
 
@@ -92,14 +102,13 @@ function fetch_parent_options(PDO $pdo, array $me, bool $isSuper, bool $isRes, b
   $st->execute($tree);
   $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 
-  // zeker weten dat 'self' erin zit
+  // zeker dat self erin zit
   $in = array_map('intval', array_column($rows,'id'));
   if (!in_array((int)$me['id'], $in, true)) {
     array_unshift($rows, ['id'=>(int)$me['id'],'name'=>$me['name'] ?? '—','role'=>$me['role'] ?? null]);
   }
   return $rows;
 }
-
 $parentOptions = $hasParent ? fetch_parent_options($pdo, $me, $isSuper, $isRes, $isSubRes) : [];
 
 // ----- POST -----
@@ -107,9 +116,7 @@ $errors = [];
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
   try { if (function_exists('verify_csrf')) verify_csrf(); }
-  catch (Throwable $e) {
-    $errors[] = 'Sessie verlopen. Probeer opnieuw.';
-  }
+  catch (Throwable $e) { $errors[] = 'Sessie verlopen. Probeer opnieuw.'; }
 
   $name     = trim((string)($_POST['name'] ?? ''));
   $email    = trim((string)($_POST['email'] ?? ''));
@@ -126,20 +133,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
       ? (int)$_POST['parent_user_id'] : null;
 
     if ($isSubRes) {
-      // sub-reseller: forceer parent op zichzelf
-      $parentId = (int)$me['id'];
+      $parentId = (int)$me['id']; // geforceerd
     } elseif ($isRes) {
-      // reseller: parent moet in eigen boom liggen (of zichzelf)
-      if ($parentId !== null) {
-        $tree = build_tree_ids($pdo, (int)$me['id']);
-        if (!in_array((int)$parentId, array_map('intval',$tree), true)) {
-          $errors[] = 'Ongeldige ouder (valt niet binnen jouw beheer).';
-        }
-      } else {
-        // geen keuze → zelf
+      // reseller: parent binnen eigen boom; zo niet → self
+      $tree = build_tree_ids($pdo, (int)$me['id']);
+      if ($parentId === null) {
         $parentId = (int)$me['id'];
+      } elseif (!in_array((int)$parentId, array_map('intval',$tree), true)) {
+        $errors[] = 'Ongeldige ouder (valt niet binnen jouw beheer).';
       }
     }
+    // super mag vrij kiezen (ook null)
   }
 
   // validatie basis
@@ -162,7 +166,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   $admin_postcode = trim((string)($_POST['admin_postcode'] ?? ''));
   $admin_city     = trim((string)($_POST['admin_city'] ?? ''));
 
-  // aansluit adres
+  // aansluit adres (inputs heten connect_*, maar worden weggeschreven naar connect_* of service_*)
   $connect_contact  = trim((string)($_POST['connect_contact'] ?? ''));
   $connect_address  = trim((string)($_POST['connect_address'] ?? ''));
   $connect_postcode = trim((string)($_POST['connect_postcode'] ?? ''));
@@ -184,11 +188,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
       if ($hasAdminPostcode)   { $cols[]='admin_postcode';   $vals[]=$admin_postcode; }
       if ($hasAdminCity)       { $cols[]='admin_city';       $vals[]=$admin_city; }
 
-      // connect/adres kolommen
-      if ($hasConnectContact)  { $cols[]='connect_contact';  $vals[]=$connect_contact; }
-      if ($hasConnectAddress)  { $cols[]='connect_address';  $vals[]=$connect_address; }
-      if ($hasConnectPostcode) { $cols[]='connect_postcode'; $vals[]=$connect_postcode; }
-      if ($hasConnectCity)     { $cols[]='connect_city';     $vals[]=$connect_city; }
+      // aansluit-adres (connect_* of service_*)
+      if ($connectCols['contact'])  { $cols[] = $connectCols['contact'];  $vals[] = $connect_contact; }
+      if ($connectCols['address'])  { $cols[] = $connectCols['address'];  $vals[] = $connect_address; }
+      if ($connectCols['postcode']) { $cols[] = $connectCols['postcode']; $vals[] = $connect_postcode; }
+      if ($connectCols['city'])     { $cols[] = $connectCols['city'];     $vals[] = $connect_city; }
 
       $ph = implode(',', array_fill(0, count($cols), '?'));
       $sql = "INSERT INTO users (".implode(',',$cols).") VALUES ({$ph})";
@@ -203,7 +207,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   }
 }
 
-// ----- Form weergave -----
+// ---- Form weergave (zonder header/footer; die zitten in layout) ----
 ?>
 
 <h4>Nieuwe gebruiker</h4>
@@ -279,14 +283,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
           $pid = (int)($po['id'] ?? 0);
           $label = '#'.$pid.' — '.($po['name'] ?? '—').(!empty($po['role']) ? ' ('.$po['role'].')' : '');
           $selected = ((string)($pid) === (string)($_POST['parent_user_id'] ?? '')) ? 'selected' : '';
-          // sub-reseller: forceer parent op zichzelf
           if ($isSubRes && $pid !== (int)$me['id']) continue;
         ?>
         <option value="<?= $pid ?>" <?= $selected ?>><?= e($label) ?></option>
       <?php endforeach; ?>
     </select>
     <?php if ($isSubRes): ?>
-      <!-- Als disabled, toch waarde meesturen -->
       <input type="hidden" name="parent_user_id" value="<?= (int)$me['id'] ?>">
     <?php endif; ?>
   </div>
@@ -334,41 +336,32 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
   </div>
   <?php endif; ?>
 
-  <!-- Aansluitadres -->
+  <!-- Aansluitadres (inputs heten connect_*, mapping naar connect_* of service_*) -->
   <div class="col-12"><hr></div>
   <div class="col-12"><h5>Aansluitadres</h5></div>
 
-  <?php if ($hasConnectContact): ?>
   <div class="col-md-6">
     <label class="form-label">Contactpersoon</label>
     <input type="text" name="connect_contact" class="form-control" value="<?= e($_POST['connect_contact'] ?? '') ?>">
   </div>
-  <?php endif; ?>
 
-  <?php if ($hasConnectAddress): ?>
   <div class="col-md-6">
     <label class="form-label">Adres</label>
     <input type="text" name="connect_address" class="form-control" value="<?= e($_POST['connect_address'] ?? '') ?>">
   </div>
-  <?php endif; ?>
 
-  <?php if ($hasConnectPostcode): ?>
   <div class="col-md-4">
     <label class="form-label">Postcode</label>
     <input type="text" name="connect_postcode" class="form-control" value="<?= e($_POST['connect_postcode'] ?? '') ?>">
   </div>
-  <?php endif; ?>
 
-  <?php if ($hasConnectCity): ?>
   <div class="col-md-8">
     <label class="form-label">Woonplaats</label>
     <input type="text" name="connect_city" class="form-control" value="<?= e($_POST['connect_city'] ?? '') ?>">
   </div>
-  <?php endif; ?>
 
   <div class="col-12 d-flex gap-2">
     <button class="btn btn-primary">Aanmaken</button>
     <a href="index.php?route=users_list" class="btn btn-outline-secondary">Annuleren</a>
   </div>
 </form>
-
