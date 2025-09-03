@@ -1,13 +1,3 @@
-Hier is een volledige, schone pages/user_add.php die:
-	•	Rollen en rechten respecteert (super → reseller/sub/klant; reseller → sub/klant; sub → klant).
-	•	Parent-selectie netjes beperkt tot je eigen boom (sub-reseller → parent = zichzelf).
-	•	Aansluitadres ondersteunt met fallback naar service_* kolommen als connect_* niet bestaan.
-	•	Alleen kolommen wegschrijft die in je database bestaan (voorkomt 1054-fouten).
-	•	CSRF + nette validaties + flash + redirect gebruikt.
-	•	Geen header/footer include (die zitten in index.php).
-
-Plak dit bestand als pages/user_add.php.
-
 <?php
 // pages/user_add.php — gebruiker toevoegen met Administratief + Aansluitadres (connect_* of service_*)
 // Layout (header/footer) wordt in index.php gedaan.
