@@ -1,5 +1,5 @@
 <?php
-// pages/dashboard.php — Tegels met o.a. “Wachten op activatie” (scoped)
+// pages/dashboard.php — Tegels met correcte tellingen
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -52,46 +52,62 @@ if (!$isSuper) {
   if (!$scopeCustomerIds) { $scopeCustomerIds = [$myId]; }
 }
 
-// --------- Tellers opbouwen (met scope) ----------
+// --------- Tellers ----------
+
+/**
+ * ACTIEVE SIMs
+ * Definitie: SIM is toegewezen aan een eindklant (users.role='customer') en
+ * de LAATSTE order voor die SIM heeft status 'completed'.
+ * (We pakken de laatste order via MAX(o.id) als proxy voor meest recente.)
+ */
 try {
-  // 1) Actieve SIMs: sim toegewezen aan eindklant + order op completed voor die sim
-  // We definiëren “eindklant” als users.role='customer'. We tellen unieke sim-id’s.
-  $params = [];
-  $whereCustomer = "u.role='customer'";
-  if (!$isSuper) {
+  if ($isSuper) {
+    $sqlActiveSims = "
+      SELECT COUNT(DISTINCT s.id)
+      FROM sims s
+      JOIN users u ON u.id = s.assigned_to_user_id AND u.role = 'customer'
+      JOIN (
+        SELECT sim_id, MAX(id) AS last_order_id
+        FROM orders
+        GROUP BY sim_id
+      ) lo ON lo.sim_id = s.id
+      JOIN orders o ON o.id = lo.last_order_id AND o.status = 'completed'
+    ";
+    $st = $pdo->prepare($sqlActiveSims);
+    $st->execute();
+  } else {
     $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $whereCustomer .= " AND u.id IN ($ph)";
-    array_push($params, ...$scopeCustomerIds);
+    $sqlActiveSims = "
+      SELECT COUNT(DISTINCT s.id)
+      FROM sims s
+      JOIN users u ON u.id = s.assigned_to_user_id AND u.role = 'customer'
+      JOIN (
+        SELECT sim_id, MAX(id) AS last_order_id
+        FROM orders
+        GROUP BY sim_id
+      ) lo ON lo.sim_id = s.id
+      JOIN orders o ON o.id = lo.last_order_id AND o.status = 'completed'
+      WHERE u.id IN ($ph)
+    ";
+    $st = $pdo->prepare($sqlActiveSims);
+    $st->execute($scopeCustomerIds);
   }
-  $sqlActiveSims = "
-    SELECT COUNT(DISTINCT s.id)
-    FROM sims s
-    JOIN users u ON u.id = s.assigned_to_user_id
-    WHERE $whereCustomer
-      AND EXISTS (
-        SELECT 1 FROM orders o
-        WHERE o.sim_id = s.id AND o.status = 'completed'
-      )
-  ";
-  $activeSims = (int)$pdo->prepare($sqlActiveSims)->execute($params) ? (int)$pdo->prepare($sqlActiveSims)->fetchColumn() : 0;
-} catch (Throwable $e) {
-  // prepared twee keer aanroepen is onhandig; herstellen:
-  $st = $pdo->prepare($sqlActiveSims);
-  $st->execute($params);
   $activeSims = (int)$st->fetchColumn();
+} catch (Throwable $e) {
+  echo '<div class="alert alert-warning">Actieve SIM’s tellen mislukt: '.e($e->getMessage()).'</div>';
+  $activeSims = 0;
 }
 
+/**
+ * SIMs op voorraad
+ * Niet 'retired' én geen order met status in ('concept','awaiting_activation','completed') aan die SIM (dus vrij beschikbaar).
+ * Voor reseller/sub-reseller beperken we tot SIMs in eigen keten: assigned_to_user_id is NULL of binnen scope.
+ */
 try {
-  // 2) SIMs op voorraad: niet retired en géén order met status concept/awaiting_activation/completed
-  // (cancelled telt niet als gekoppeld)
   $params = [];
   $whereStock = " (s.status IS NULL OR s.status <> 'retired') ";
   if (!$isSuper) {
     $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    // voorraad voor reseller/sub: toon voorraad die in eigen keten valt.
-    // Er zijn 2 varianten in de praktijk:
-    // - SIM is nog niet toegewezen (assigned_to_user_id IS NULL): dan laten we hem alleen zien als hij 'onder' jou valt is lastig te bepalen.
-    //   In deze portal gebruiken we vaak assigned_to_user_id als eigenaar. Dus neem SIMs met assigned_to_user_id IN scope óf NULL.
     $whereStock .= " AND (s.assigned_to_user_id IS NULL OR s.assigned_to_user_id IN ($ph))";
     array_push($params, ...$scopeCustomerIds);
   }
@@ -112,36 +128,42 @@ try {
   $stockSims = 0;
 }
 
+/**
+ * Wachten op activatie
+ * orders.status = 'awaiting_activation' gefilterd op scope (klant in boom)
+ */
 try {
-  // 3) Wachten op activatie: orders.status = awaiting_activation
-  $params = [];
-  $whereOrders = " o.status = 'awaiting_activation' ";
-  if (!$isSuper) {
+  if ($isSuper) {
+    $sqlAwait = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation'";
+    $st = $pdo->prepare($sqlAwait);
+    $st->execute();
+  } else {
     $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $whereOrders .= " AND o.customer_id IN ($ph)";
-    array_push($params, ...$scopeCustomerIds);
+    $sqlAwait = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation' AND o.customer_id IN ($ph)";
+    $st = $pdo->prepare($sqlAwait);
+    $st->execute($scopeCustomerIds);
   }
-  $sqlAwait = "SELECT COUNT(*) FROM orders o WHERE $whereOrders";
-  $st = $pdo->prepare($sqlAwait);
-  $st->execute($params);
   $awaiting = (int)$st->fetchColumn();
 } catch (Throwable $e) {
   echo '<div class="alert alert-warning">Aantal “Wachten op activatie” mislukt: '.e($e->getMessage()).'</div>';
   $awaiting = 0;
 }
 
+/**
+ * Actieve klanten
+ * users.role='customer' AND is_active=1 (met scope)
+ */
 try {
-  // 4) Actieve klanten: users.role='customer' AND is_active=1
-  $params = [];
-  $whereCust = " role = 'customer' AND is_active = 1 ";
-  if (!$isSuper) {
+  if ($isSuper) {
+    $sqlActiveCustomers = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active = 1";
+    $st = $pdo->prepare($sqlActiveCustomers);
+    $st->execute();
+  } else {
     $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $whereCust .= " AND id IN ($ph)";
-    array_push($params, ...$scopeCustomerIds);
+    $sqlActiveCustomers = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active=1 AND id IN ($ph)";
+    $st = $pdo->prepare($sqlActiveCustomers);
+    $st->execute($scopeCustomerIds);
   }
-  $sqlActiveCustomers = "SELECT COUNT(*) FROM users WHERE $whereCust";
-  $st = $pdo->prepare($sqlActiveCustomers);
-  $st->execute($params);
   $activeCustomers = (int)$st->fetchColumn();
 } catch (Throwable $e) {
   echo '<div class="alert alert-warning">Actieve klanten tellen mislukt: '.e($e->getMessage()).'</div>';
@@ -149,6 +171,7 @@ try {
 }
 
 // -------- UI --------
+echo function_exists('flash_output') ? flash_output() : '';
 ?>
 <div class="row g-3">
   <div class="col-md-3">
@@ -219,6 +242,3 @@ try {
     </div>
   </div>
 </div>
-
-<?php
-// (optioneel) extra: laatst gewijzigde bestellingen/snippets kun je hier toevoegen.
