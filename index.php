@@ -134,6 +134,10 @@ try {
             require __DIR__ . '/pages/ajax_sims_search.php';
             break;
 
+        case 'profile':
+            include __DIR__ . '/pages/profile.php';
+            break;
+
         default:
             // fallback: als ingelogd → dashboard, anders → login
             if (auth_user()) {
