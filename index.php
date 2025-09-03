@@ -135,7 +135,7 @@ try {
             break;
 
         case 'profile':
-            include __DIR__ . '/pages/profile.php';
+            require __DIR__ . '/pages/profile.php';
             break;
 
         default:
