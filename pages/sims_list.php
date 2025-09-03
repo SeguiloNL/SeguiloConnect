@@ -163,13 +163,14 @@ echo function_exists('flash_output') ? flash_output() : '';
                 </a>
 
                 <!-- Verwijderen (alleen Super-admin; pagina is al super-only) -->
-                <form method="post" action="index.php?route=sim_delete&id=<?= (int)$r['id'] ?>" class="d-inline"
-                      onsubmit="return confirm('Simkaart verwijderen? Dit kan niet ongedaan worden gemaakt.');">
-                  <?php if (function_exists('csrf_field')) csrf_field(); ?>
-                  <button class="btn btn-sm btn-outline-danger" title="Verwijderen">
-                    <i class="bi bi-trash"></i>
-                  </button>
-                </form>
+               <form method="post" action="index.php?route=sim_delete"
+                  onsubmit="return confirm('Simkaart verwijderen? Dit kan niet ongedaan worden gemaakt.');">
+          <?php if (function_exists('csrf_field')) csrf_field(); ?>
+              <input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
+              <button type="submit" class="btn btn-sm btn-outline-danger" title="Verwijderen">
+              <i class="bi bi-trash"></i>
+              </button>
+            </form>
               </td>
             </tr>
           <?php endforeach; ?>
