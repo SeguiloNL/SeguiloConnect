@@ -99,7 +99,7 @@ echo function_exists('flash_output') ? flash_output() : '';
     </form>
 
     <!-- Nieuw Abonnement -->
-    <a href="/plan/plan_add.php" class="btn btn-success">
+    <a href="index.php?route=plan_add" class="btn btn-success">
       <i class="bi bi-plus-lg"></i> Nieuw Abonnement
     </a>
   </div>
