@@ -257,6 +257,18 @@ echo function_exists('flash_output') ? flash_output() : '';
                 <div class="text-muted small mb-1">Voorbeeld:</div>
                 <img src="<?= e($brandLogoUrl) ?>" alt="Logo preview" style="height:40px; width:auto;">
               </div>
+
+          <div class="col-12 col-lg-6">
+            <div class="card h-100">
+                <div class="card-body">
+              <h5 class="card-title">Systeemgebruikers</h5>
+              <p class="text-muted">Beheer accounts met rol <code>super_admin</code>.</p>
+              <a class="btn btn-outline-primary" href="index.php?route=system_users">
+                    Open beheer Systeemgebruikers
+              </a>
+                </div>
+              </div>
+            </div>  
             <?php endif; ?>
           </div>
         </form>

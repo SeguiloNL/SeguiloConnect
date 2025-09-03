@@ -137,6 +137,10 @@ try {
             require __DIR__ . '/pages/profile.php';
             break;
 
+        case 'system_users':
+            require __DIR__ . '/pages/system_users.php';
+            break;
+
         default:
             // fallback: als ingelogd → dashboard, anders → login
             if (auth_user()) {
