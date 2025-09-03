@@ -1,12 +1,3 @@
-Hier is een volledige, vervangende views/header.php die exact doet wat je vroeg:
-	•	Hoofdmenu’s: Dashboard, Klanten, Abonnementen, Bestellen
-	•	Rechts: dropdown “Mijn account” met Mijn profiel, Systeembeheer (alleen Super-admin) en Uitloggen
-	•	Links logo i.p.v. app-naam. Het logo-URL wordt gelezen uit system_settings.k='brand_logo_url' (instelbaar op je System Admin-pagina). Zonder setting valt hij terug op de app-naam.
-	•	Zelfde themakleur (#1e73be) en witte menu-tekst.
-	•	Simkaarten vind je logisch onder Bestellen (beheer/flows rond bestellen).
-
-Plak dit als views/header.php.
-
 <?php
 // views/header.php
 // Vereist: auth_user(), role constants (optioneel), db(), e(), base_url()
