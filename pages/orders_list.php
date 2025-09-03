@@ -1,302 +1,300 @@
 <?php
-// pages/orders_list.php — overzicht bestellingen + "Nieuwe bestelling"-knop
+// pages/orders_list.php — Bestellingen met filters, acties en paginering
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
 $me = auth_user();
 if (!$me) { header('Location: index.php?route=login'); exit; }
 
-$role       = $me['role'] ?? '';
-$isSuper    = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
-$isRes      = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
-$isSubRes   = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
-$isCustomer = !($isSuper || $isRes || $isSubRes);
+$myId = (int)($me['id'] ?? 0);
+$role = (string)($me['role'] ?? '');
+$isSuper  = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
+$isRes    = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
+$isSubRes = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
 
-// --- DB ---
+// Alleen super/res/sub
+if (!$isSuper && !$isRes && !$isSubRes) {
+  echo '<div class="alert alert-danger">Je hebt geen toegang tot deze pagina.</div>';
+  return;
+}
+
+// --- DB
 try { $pdo = db(); }
-catch (Throwable $e) { echo '<div class="alert alert-danger">PDO connectie niet beschikbaar.</div>'; return; }
+catch (Throwable $e) { echo '<div class="alert alert-danger">DB niet beschikbaar: '.e($e->getMessage()).'</div>'; return; }
 
-// --- helpers ---
+// --- helpers
 function column_exists(PDO $pdo, string $table, string $col): bool {
-    $q = $pdo->quote($col);
-    $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
-    return $st ? (bool)$st->fetch(PDO::FETCH_ASSOC) : false;
+  $q = $pdo->quote($col);
+  $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
+  return $st ? (bool)$st->fetch(PDO::FETCH_ASSOC) : false;
 }
-function table_exists(PDO $pdo, string $table): bool {
-    $q = $pdo->quote($table);
-    return (bool)$pdo->query("SHOW TABLES LIKE {$q}")->fetchColumn();
-}
+
+/** Bouw alle user-ids in de boom van $rootId (inclusief root), via users.parent_user_id */
 function build_tree_ids(PDO $pdo, int $rootId): array {
-    if (!column_exists($pdo, 'users', 'parent_user_id')) return [$rootId];
-    $ids = [$rootId];
-    $queue = [$rootId];
-    $seen  = [$rootId => true];
-    while ($queue) {
-        $chunk = array_splice($queue, 0, 100);
-        $ph = implode(',', array_fill(0, count($chunk), '?'));
-        $st = $pdo->prepare("SELECT id FROM users WHERE parent_user_id IN ($ph)");
-        $st->execute($chunk);
-        foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $cid) {
-            $cid = (int)$cid;
-            if (!isset($seen[$cid])) { $seen[$cid] = true; $ids[] = $cid; $queue[] = $cid; }
-        }
+  if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
+  $ids = [$rootId];
+  $queue = [$rootId];
+  $seen = [$rootId => true];
+  while ($queue) {
+    $chunk = array_splice($queue, 0, 200);
+    $ph = implode(',', array_fill(0, count($chunk), '?'));
+    $st = $pdo->prepare("SELECT id FROM users WHERE parent_user_id IN ($ph)");
+    $st->execute($chunk);
+    foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $cid) {
+      $cid = (int)$cid;
+      if (!isset($seen[$cid])) { $seen[$cid]=true; $ids[]=$cid; $queue[]=$cid; }
     }
-    return $ids;
+  }
+  return $ids;
 }
 
-// --- kolommen/joins mogelijk? ---
-$hasCreatedBy   = column_exists($pdo, 'orders', 'created_by_user_id');
-$hasCustomerCol = column_exists($pdo, 'orders', 'customer_user_id');
-$hasResellerCol = column_exists($pdo, 'orders', 'reseller_user_id'); // optioneel
-$hasSimId       = column_exists($pdo, 'orders', 'sim_id');
-$hasPlanId      = column_exists($pdo, 'orders', 'plan_id');
-$hasCreatedAt   = column_exists($pdo, 'orders', 'created_at');
-$hasUpdatedAt   = column_exists($pdo, 'orders', 'updated_at');
+function status_label(string $s): string {
+  return match ($s) {
+    'concept'             => 'Concept',
+    'awaiting_activation' => 'Wachten op activatie',
+    'completed'           => 'Voltooid',
+    'cancelled'           => 'Geannuleerd',
+    default               => ucfirst($s),
+  };
+}
 
-$tblSims  = table_exists($pdo, 'sims');
-$tblPlans = table_exists($pdo, 'plans');
+echo function_exists('flash_output') ? flash_output() : '';
 
-// --- filters ---
-$status   = trim((string)($_GET['status'] ?? ''));
-$q        = trim((string)($_GET['q'] ?? ''));
+// --- Filters (status)
+$validStatus = ['all','concept','awaiting_activation','completed','cancelled'];
+$status = strtolower((string)($_GET['status'] ?? 'all'));
+if (!in_array($status, $validStatus, true)) $status = 'all';
 
-// paginatie
-$allowedPerPage = [25,50,100,1000,5000];
+// --- Paginering
 $perPage = (int)($_GET['per_page'] ?? 25);
-if (!in_array($perPage, $allowedPerPage, true)) $perPage = 25;
-$page   = max(1, (int)($_GET['page'] ?? 1));
-$offset = ($page - 1) * $perPage;
+if (!in_array($perPage, [25,50,100], true)) $perPage = 25;
+$page    = max(1, (int)($_GET['page'] ?? 1));
+$offset  = ($page - 1) * $perPage;
 
-// --- FROM / JOIN ---
-$selectCols = ['o.id', 'o.status'];
-if ($hasCreatedBy)   $selectCols[] = 'o.created_by_user_id';
-if ($hasCustomerCol) $selectCols[] = 'o.customer_user_id';
-if ($hasResellerCol) $selectCols[] = 'o.reseller_user_id';
-if ($hasSimId)       $selectCols[] = 'o.sim_id';
-if ($hasPlanId)      $selectCols[] = 'o.plan_id';
-if ($hasCreatedAt)   $selectCols[] = 'o.created_at';
-if ($hasUpdatedAt)   $selectCols[] = 'o.updated_at';
-
-$sqlFrom = " FROM orders o ";
-$sqlJoin = "";
-
-// klant
-if ($hasCustomerCol) {
-    $sqlJoin .= " LEFT JOIN users u_customer ON u_customer.id = o.customer_user_id ";
-} elseif ($hasCreatedBy) {
-    $sqlJoin .= " LEFT JOIN users u_customer ON u_customer.id = o.created_by_user_id ";
-}
-
-// sim
-if ($hasSimId && $tblSims) {
-    $sqlJoin .= " LEFT JOIN sims s ON s.id = o.sim_id ";
-}
-// plan
-if ($hasPlanId && $tblPlans) {
-    $sqlJoin .= " LEFT JOIN plans p ON p.id = o.plan_id ";
-}
-
-// --- WHERE + params ---
-$where  = [];
+// --- WHERE + scope
+$where = [];
 $params = [];
 
-// status
-if ($status !== '') {
-    $where[]  = 'o.status = ?';
-    $params[] = $status;
+// Status
+if ($status !== 'all') {
+  $where[] = "o.status = ?";
+  $params[] = $status;
 }
 
-// zoeken
-if ($q !== '') {
-    $or = [];
-    if (ctype_digit($q)) { $or[]='o.id = ?'; $params[]=(int)$q; }
-    $or[] = '(u_customer.name LIKE ?)';
-    $params[] = '%' . $q . '%';
-    if ($tblSims && column_exists($pdo,'sims','iccid') && $hasSimId) { $or[]='(s.iccid LIKE ?)'; $params[]='%'.$q.'%'; }
-    if ($tblPlans && column_exists($pdo,'plans','name') && $hasPlanId) { $or[]='(p.name LIKE ?)'; $params[]='%'.$q.'%'; }
-    $where[] = '(' . implode(' OR ', $or) . ')';
-}
-
-// scope
+// Scope op klant (customer_id in boom)
 if (!$isSuper) {
-    $treeIds = build_tree_ids($pdo, (int)$me['id']);
-    $scopes = [];
-    if ($hasCreatedBy) {
-        $ph = implode(',', array_fill(0, count($treeIds), '?'));
-        $scopes[] = "o.created_by_user_id IN ($ph)";
-        array_push($params, ...$treeIds);
-    }
-    if ($hasCustomerCol) {
-        $ph2 = implode(',', array_fill(0, count($treeIds), '?'));
-        $scopes[] = "o.customer_user_id IN ($ph2)";
-        array_push($params, ...$treeIds);
-    }
-    if ($scopes) {
-        $where[] = '(' . implode(' OR ', $scopes) . ')';
-    } else {
-        $where[] = '1=0';
-    }
+  $scopeIds = build_tree_ids($pdo, $myId);
+  if (!$scopeIds) $scopeIds = [$myId];
+  $ph = implode(',', array_fill(0, count($scopeIds), '?'));
+  $where[] = "o.customer_id IN ($ph)";
+  array_push($params, ...$scopeIds);
 }
 
-$sqlWhere = $where ? (' WHERE ' . implode(' AND ', $where)) : '';
+// WHERE compose
+$whereSql = $where ? ('WHERE '.implode(' AND ', $where)) : '';
 
-// --- COUNT ---
-$sqlCount = "SELECT COUNT(*) " . $sqlFrom . $sqlJoin . $sqlWhere;
-$stCount  = $pdo->prepare($sqlCount);
-$stCount->execute($params);
-$total = (int)$stCount->fetchColumn();
-
-// --- DATA ---
-$sqlSelect = "SELECT " . implode(', ', $selectCols)
-           . ", u_customer.name AS customer_name"
-           . ($tblSims && column_exists($pdo,'sims','iccid') && $hasSimId ? ", s.iccid AS sim_iccid" : "")
-           . ($tblPlans && column_exists($pdo,'plans','name') && $hasPlanId ? ", p.name AS plan_name" : "")
-           . $sqlFrom . $sqlJoin . $sqlWhere
-           . " ORDER BY o.id DESC LIMIT {$perPage} OFFSET {$offset}";
-$st = $pdo->prepare($sqlSelect);
-$st->execute($params);
-$rows = $st->fetchAll(PDO::FETCH_ASSOC);
-
+// --- Count
+try {
+  $sqlCount = "SELECT COUNT(*)
+               FROM orders o
+               $whereSql";
+  $stc = $pdo->prepare($sqlCount);
+  $stc->execute($params);
+  $total = (int)$stc->fetchColumn();
+} catch (Throwable $e) {
+  echo '<div class="alert alert-danger">Tellen mislukt: '.e($e->getMessage()).'</div>'; return;
+}
 $totalPages = max(1, (int)ceil($total / $perPage));
 
-// url helper
-function orders_url(array $extra = []): string {
-    $base = 'index.php';
-    $params = array_merge([
-        'route'    => 'orders_list',
-        'status'   => $_GET['status'] ?? null,
-        'q'        => $_GET['q'] ?? null,
-        'per_page' => $_GET['per_page'] ?? null,
-    ], $extra);
-    $params = array_filter($params, fn($v) => $v !== null && $v !== '');
-    return $base . '?' . http_build_query($params);
+// --- Fetch rows
+try {
+  $sql = "SELECT
+            o.id,
+            o.customer_id,
+            o.sim_id,
+            o.plan_id,
+            o.status,
+            o.created_at,
+            u.name   AS customer_name,
+            s.iccid  AS sim_iccid,
+            p.name   AS plan_name
+          FROM orders o
+          LEFT JOIN users u ON u.id = o.customer_id
+          LEFT JOIN sims  s ON s.id = o.sim_id
+          LEFT JOIN plans p ON p.id = o.plan_id
+          $whereSql
+          ORDER BY o.created_at DESC, o.id DESC
+          LIMIT $perPage OFFSET $offset";
+  $st = $pdo->prepare($sql);
+  $st->execute($params);
+  $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+  echo '<div class="alert alert-danger">Laden mislukt: '.e($e->getMessage()).'</div>'; return;
+}
+
+// --- URL helper
+function orders_list_url_keep(array $extra): string {
+  $base = 'index.php?route=orders_list';
+  $qs = array_merge($_GET, $extra);
+  return $base.'&'.http_build_query($qs);
 }
 ?>
-<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
-  <h4 class="mb-0">Bestellingen</h4>
 
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+  <h4>Bestellingen</h4>
   <div class="d-flex align-items-center gap-2">
-    <form class="d-flex gap-2" method="get" action="index.php">
+    <form method="get" class="d-flex align-items-center gap-2">
       <input type="hidden" name="route" value="orders_list">
-      <?php if ($status !== ''): ?>
-        <input type="hidden" name="status" value="<?= e($status) ?>">
-      <?php endif; ?>
-      <input type="text" class="form-control" name="q" value="<?= e($q) ?>" placeholder="Zoek op #id / klant / ICCID / plan">
-      <select class="form-select" name="per_page" onchange="this.form.submit()">
-        <?php foreach ([25,50,100,1000,5000] as $opt): ?>
-          <option value="<?= $opt ?>" <?= $perPage===$opt?'selected':'' ?>><?= $opt ?>/pag.</option>
+      <label class="form-label m-0">Per pagina</label>
+      <select name="per_page" class="form-select form-select-sm" onchange="this.form.submit()">
+        <?php foreach ([25,50,100] as $opt): ?>
+          <option value="<?= $opt ?>" <?= $perPage===$opt?'selected':'' ?>><?= $opt ?></option>
         <?php endforeach; ?>
       </select>
-      <button class="btn btn-outline-light border">Zoeken</button>
+      <input type="hidden" name="status" value="<?= e($status) ?>">
+      <input type="hidden" name="page" value="1">
     </form>
 
-    <?php if (!$isCustomer): ?>
-      <a class="btn btn-primary" href="index.php?route=order_add">
-        Nieuwe bestelling
-      </a>
+    <a href="index.php?route=order_add" class="btn btn-success">
+      <i class="bi bi-plus-lg"></i> Nieuwe bestelling
+    </a>
+  </div>
+</div>
+
+<!-- Status filters -->
+<div class="btn-group mb-3" role="group" aria-label="Status filter">
+  <?php
+    $filters = [
+      'all'                 => 'Alle',
+      'concept'             => 'Concept',
+      'awaiting_activation' => 'Wachten op activatie',
+      'completed'           => 'Voltooid',
+      'cancelled'           => 'Geannuleerd',
+    ];
+    foreach ($filters as $key => $label):
+      $active = ($status === $key) ? ' active' : '';
+      $url = orders_list_url_keep(['status'=>$key, 'page'=>1]);
+  ?>
+    <a class="btn btn-outline-primary<?= $active ?>" href="<?= e($url) ?>"><?= e($label) ?></a>
+  <?php endforeach; ?>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <?php if ($total === 0): ?>
+      <div class="text-muted">Geen bestellingen gevonden.</div>
+    <?php else: ?>
+      <div class="table-responsive">
+        <table class="table table-striped align-middle">
+          <thead>
+            <tr>
+              <th>Klant</th>
+              <th>SIM</th>
+              <th>Abonnement</th>
+              <th>Status</th>
+              <th>Aangemaakt</th>
+              <th class="text-end" style="width:160px;">Acties</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($rows as $r): ?>
+              <tr>
+                <td><?= e($r['customer_name'] ?: ('#'.(int)$r['customer_id'])) ?></td>
+                <td><?= e($r['sim_iccid'] ?: ('#'.(int)$r['sim_id'])) ?></td>
+                <td><?= e($r['plan_name'] ?: ('#'.(int)$r['plan_id'])) ?></td>
+                <td>
+                  <?php
+                    $s = (string)($r['status'] ?? '');
+                    $badge = match ($s) {
+                      'concept'             => 'bg-secondary',
+                      'awaiting_activation' => 'bg-warning text-dark',
+                      'completed'           => 'bg-success',
+                      'cancelled'           => 'bg-danger',
+                      default               => 'bg-light text-dark'
+                    };
+                  ?>
+                  <span class="badge <?= $badge ?>"><?= e(status_label($s)) ?></span>
+                </td>
+                <td><?= e($r['created_at'] ?? '') ?></td>
+                <td class="text-end">
+                  <!-- Bekijken -->
+                  <a class="btn btn-sm btn-outline-primary" title="Bekijken"
+                     href="index.php?route=order_edit&id=<?= (int)$r['id'] ?>">
+                    <i class="bi bi-eye"></i>
+                  </a>
+
+                  <!-- Annuleren -->
+                  <?php if (($r['status'] ?? '') !== 'cancelled' && ($r['status'] ?? '') !== 'completed'): ?>
+                    <form method="post" action="index.php?route=order_cancel" class="d-inline"
+                          onsubmit="return confirm('Deze bestelling annuleren?');">
+                      <?php if (function_exists('csrf_field')) csrf_field(); ?>
+                      <input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
+                      <button class="btn btn-sm btn-outline-secondary" title="Annuleren">
+                        <i class="bi bi-slash-circle"></i>
+                      </button>
+                    </form>
+                  <?php endif; ?>
+
+                  <!-- Verwijderen (alleen Super-admin) -->
+                  <?php if ($isSuper): ?>
+                    <form method="post" action="index.php?route=order_delete" class="d-inline"
+                          onsubmit="return confirm('Bestelling VERWIJDEREN? Dit is niet omkeerbaar.');">
+                      <?php if (function_exists('csrf_field')) csrf_field(); ?>
+                      <input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
+                      <button class="btn btn-sm btn-outline-danger" title="Verwijderen">
+                        <i class="bi bi-trash"></i>
+                      </button>
+                    </form>
+                  <?php endif; ?>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Paginering -->
+      <div class="d-flex justify-content-between align-items-center mt-3 flex-wrap gap-2">
+        <div class="text-muted small">
+          Totaal: <?= (int)$total ?> · Pagina <?= (int)$page ?> van <?= (int)$totalPages ?>
+        </div>
+        <nav>
+          <ul class="pagination pagination-sm mb-0">
+            <?php
+              $prevDisabled = ($page <= 1) ? ' disabled' : '';
+              $nextDisabled = ($page >= $totalPages) ? ' disabled' : '';
+              $baseQs = $_GET;
+              $baseQs['route'] = 'orders_list';
+              $baseQs['per_page'] = $perPage;
+              $baseQs['status'] = $status;
+            ?>
+            <li class="page-item<?= $prevDisabled ?>">
+              <a class="page-link" href="<?= $page > 1 ? ('index.php?'.http_build_query(array_merge($baseQs,['page'=>$page-1]))) : '#' ?>">Vorige</a>
+            </li>
+            <?php
+              $window = 2;
+              $start = max(1, $page - $window);
+              $end   = min($totalPages, $page + $window);
+              if ($start > 1) {
+                echo '<li class="page-item"><a class="page-link" href="index.php?'.http_build_query(array_merge($baseQs,['page'=>1])).'">1</a></li>';
+                if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+              }
+              for ($p=$start; $p<=$end; $p++) {
+                $active = ($p === $page) ? ' active' : '';
+                echo '<li class="page-item'.$active.'"><a class="page-link" href="index.php?'.http_build_query(array_merge($baseQs,['page'=>$p])).'">'.$p.'</a></li>';
+              }
+              if ($end < $totalPages) {
+                if ($end < $totalPages-1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                echo '<li class="page-item"><a class="page-link" href="index.php?'.http_build_query(array_merge($baseQs,['page'=>$totalPages])).'">'.$totalPages.'</a></li>';
+              }
+            ?>
+            <li class="page-item<?= $nextDisabled ?>">
+              <a class="page-link" href="<?= $page < $totalPages ? ('index.php?'.http_build_query(array_merge($baseQs,['page'=>$page+1]))) : '#' ?>">Volgende</a>
+            </li>
+          </ul>
+        </nav>
+      </div>
+
     <?php endif; ?>
   </div>
 </div>
-
-<div class="mb-3">
-  <div class="btn-group" role="group">
-    <a class="btn btn<?= $status==='' ? '' : '-outline' ?>-primary" href="index.php?route=orders_list">Alle</a>
-    <a class="btn btn<?= $status==='Concept' ? '' : '-outline' ?>-primary" href="index.php?route=orders_list&status=Concept">Concept</a>
-    <a class="btn btn<?= $status==='Wachten op activatie' ? '' : '-outline' ?>-primary" href="index.php?route=orders_list&status=Wachten%20op%20activatie">Wachten op activatie</a>
-    <a class="btn btn<?= $status==='Voltooid' ? '' : '-outline' ?>-primary" href="index.php?route=orders_list&status=Voltooid">Voltooid</a>
-    <a class="btn btn<?= $status==='geannuleerd' ? '' : '-outline' ?>-primary" href="index.php?route=orders_list&status=geannuleerd">Geannuleerd</a>
-  </div>
-</div>
-
-<?php if ($total === 0): ?>
-  <div class="alert alert-info">Geen bestellingen gevonden.</div>
-<?php else: ?>
-  <div class="table-responsive">
-    <table class="table table-sm align-middle">
-      <thead>
-        <tr>
-          <th style="width:80px;">#</th>
-          <th>Klant</th>
-          <th>SIM</th>
-          <th>Abonnement</th>
-          <th>Status</th>
-          <th style="width:160px;">Aangemaakt</th>
-          <th style="width:220px;">Acties</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php foreach ($rows as $r): ?>
-          <tr>
-            <td>#<?= (int)$r['id'] ?></td>
-            <td>
-              <?php
-                $custName = $r['customer_name'] ?? '';
-                if ($hasCustomerCol && !empty($r['customer_user_id'])) {
-                    echo e('#'.$r['customer_user_id'].' — '.($custName ?: 'Onbekend'));
-                } elseif ($hasCreatedBy && !empty($r['created_by_user_id'])) {
-                    echo e('#'.$r['created_by_user_id'].' — '.($custName ?: 'Onbekend'));
-                } else {
-                    echo '<span class="text-muted">—</span>';
-                }
-              ?>
-            </td>
-            <td><?= e($r['sim_iccid'] ?? '') ?></td>
-            <td><?= e($r['plan_name'] ?? '') ?></td>
-            <td><?= e($r['status'] ?? '') ?></td>
-            <td>
-              <?php
-                if (!empty($r['created_at'])) echo e($r['created_at']);
-                elseif (!empty($r['updated_at'])) echo e($r['updated_at']);
-                else echo '<span class="text-muted">—</span>';
-              ?>
-            </td>
-            <td>
-              <div class="btn-group btn-group-sm" role="group">
-                <a class="btn btn-outline-primary" href="index.php?route=order_edit&id=<?= (int)$r['id'] ?>">Bekijken</a>
-                <?php
-                  // Verwijderen: super-admin altijd; reseller alleen binnen eigen scope
-                  $canDelete = false;
-                  if ($isSuper) {
-                      $canDelete = true;
-                  } elseif ($isRes || $isSubRes) {
-                      $treeIds = build_tree_ids($pdo, (int)$me['id']);
-                      if ($hasCreatedBy && in_array((int)($r['created_by_user_id'] ?? 0), $treeIds, true)) $canDelete = true;
-                      if ($hasCustomerCol && in_array((int)($r['customer_user_id'] ?? 0), $treeIds, true)) $canDelete = true;
-                  }
-                ?>
-                <?php if ($canDelete): ?>
-                  <form method="post" action="index.php?route=order_delete" onsubmit="return confirm('Weet je zeker dat je deze bestelling wil verwijderen?');">
-                    <?php if (function_exists('csrf_field')) csrf_field(); ?>
-                    <input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
-                    <button class="btn btn-outline-danger">Verwijderen</button>
-                  </form>
-                <?php endif; ?>
-              </div>
-            </td>
-          </tr>
-        <?php endforeach; ?>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Paginatie -->
-  <nav aria-label="Paginatie">
-    <ul class="pagination">
-      <li class="page-item <?= $page<=1?'disabled':'' ?>">
-        <a class="page-link" href="<?= e(orders_url(['page'=>1])) ?>">«</a>
-      </li>
-      <li class="page-item <?= $page<=1?'disabled':'' ?>">
-        <a class="page-link" href="<?= e(orders_url(['page'=>max(1,$page-1)])) ?>">‹</a>
-      </li>
-      <li class="page-item active">
-        <span class="page-link"><?= (int)$page ?> / <?= (int)$totalPages ?></span>
-      </li>
-      <li class="page-item <?= $page>=$totalPages?'disabled':'' ?>">
-        <a class="page-link" href="<?= e(orders_url(['page'=>min($totalPages,$page+1)])) ?>">›</a>
-      </li>
-      <li class="page-item <?= $page>=$totalPages?'disabled':'' ?>">
-        <a class="page-link" href="<?= e(orders_url(['page'=>$totalPages])) ?>">»</a>
-      </li>
-    </ul>
-  </nav>
-<?php endif; ?>
