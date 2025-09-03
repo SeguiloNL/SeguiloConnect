@@ -315,9 +315,21 @@ if (!function_exists('role_label')) {
 }
 
 if (!function_exists('redirect')) {
-    function redirect(string $url): void
-    {
-        header('Location: ' . $url);
-        exit;
+  function redirect(string $url, int $status = 302): void
+  {
+    // Normaliseer URL (relatief naar index.php toelaten)
+    if ($url === '') { $url = 'index.php'; }
+
+    // Als headers nog niet verzonden zijn: gewone header-redirect
+    if (!headers_sent()) {
+      header('Location: ' . $url, true, $status);
+      exit;
     }
+
+    // Fallback: headers al verzonden -> JS + <noscript> refresh
+    $safeUrl = htmlspecialchars($url, ENT_QUOTES, 'UTF-8');
+    echo '<script>window.location.href = ' . json_encode($url) . ';</script>';
+    echo '<noscript><meta http-equiv="refresh" content="0;url=' . $safeUrl . '"></noscript>';
+    exit;
+  }
 }
