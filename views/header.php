@@ -148,8 +148,12 @@ try {
       </ul>
     </div>
     <?php endif; ?>
-    
   </div>
+<?php if (!empty($_SESSION['user']['role']) && $_SESSION['user']['role'] === 'Super-admin'): ?>
+<li class="nav-item">
+  <a class="nav-link" href="index.php?route=vendor_orders">Order activatie</a>
+</li>
+<?php endif; ?>
 </nav>
 
 <!-- Impersonatie-banner -->
