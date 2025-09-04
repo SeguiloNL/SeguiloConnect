@@ -127,12 +127,6 @@ try {
         </li>
       </ul>
 
-      <?php if (!empty($_SESSION['user']['role']) && $_SESSION['user']['role'] === 'Super-admin'): ?>
-<li class="nav-item">
-  <a class="nav-link" href="index.php?route=vendor_orders">Order activatie</a>
-</li>
-<?php endif; ?>
-
       <!-- Rechterzijde: Mijn account -->
       <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
         <li class="nav-item dropdown">
