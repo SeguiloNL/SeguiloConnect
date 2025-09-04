@@ -50,10 +50,6 @@ if ($route === 'login' && auth_user()) {
 // ---- 5) Header tonen ----
 include __DIR__ . '/views/header.php';
 
-// Bovenin: zorg dat user en role al bekend zijn
-require_once __DIR__.'/lib/Vendors/ApiControlCenterClient.php'; // nieuwe clientklasse
-
-
 // ---- 6) Router voor views/pages ----
 try {
     switch ($route) {
@@ -152,21 +148,6 @@ try {
         case 'system_users':
             require __DIR__ . '/pages/system_users.php';
             break;
-
-        case 'vendor_orders':
-            require_role('Super-admin');
-            include __DIR__.'/pages/vendor_orders.php';
-            break;
-
-        case 'vendor_settings':
-             require_role('Super-admin');
-                include __DIR__.'/pages/vendor_settings.php';
-            break;
-
-case 'vendor_order_activate':
-  require_role('Super-admin');
-  include __DIR__.'/pages/vendor_order_activate.php';
-  break;    
 
         default:
             // fallback: als ingelogd → dashboard, anders → login

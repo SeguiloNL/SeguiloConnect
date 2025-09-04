@@ -10,7 +10,6 @@
 require_once __DIR__ . '/helpers.php';
 app_session_start();
 
-
 /**
  * Log een gebruiker in door de sessie-user te zetten.
  * @param array $user  Minimaal ['id'=>int]
