@@ -148,6 +148,14 @@ try {
       </ul>
     </div>
     <?php endif; ?>
+<<<<<<< HEAD
+=======
+    <?php if (has_role('Super-admin')): ?>
+<li class="nav-item">
+  <a class="nav-link" href="index.php?route=vendor_orders">Order activatie</a>
+</li>
+<?php endif; ?>
+>>>>>>> parent of 6fbe6d8 (Update header.php)
   </div>
 </nav>
 
