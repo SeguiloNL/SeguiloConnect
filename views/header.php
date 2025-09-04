@@ -149,6 +149,7 @@ try {
     </div>
     <?php endif; ?>
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
     <?php if (has_role('Super-admin')): ?>
 <li class="nav-item">
@@ -156,6 +157,8 @@ try {
 </li>
 <?php endif; ?>
 >>>>>>> parent of 6fbe6d8 (Update header.php)
+=======
+>>>>>>> parent of fa37eb6 (Vendor implementatie)
   </div>
 </nav>
 
