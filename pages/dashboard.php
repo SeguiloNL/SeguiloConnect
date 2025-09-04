@@ -1,5 +1,5 @@
 <?php
-// pages/dashboard.php — Tegels met correcte tellingen
+// pages/dashboard.php — Tegels met correcte scoping voor VOORRAAD
 require_once __DIR__ . '/../helpers.php';
 app_session_start();
 
@@ -24,8 +24,6 @@ function column_exists(PDO $pdo, string $table, string $col): bool {
   $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
   return $st ? (bool)$st->fetch(PDO::FETCH_ASSOC) : false;
 }
-
-/** Alle user-ids in de boom (incl. root) via users.parent_user_id */
 function build_tree_ids(PDO $pdo, int $rootId): array {
   if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
   $ids = [$rootId];
@@ -39,57 +37,42 @@ function build_tree_ids(PDO $pdo, int $rootId): array {
     $st->execute($chunk);
     foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $cid) {
       $cid = (int)$cid;
-      if (!isset($seen[$cid])) { $seen[$cid] = true; $ids[] = $cid; $queue[] = $cid; }
+      if (!isset($seen[$cid])) { $seen[$cid]=true; $ids[]=$cid; $queue[]=$cid; }
     }
   }
   return $ids;
 }
 
-// Scope-ids voor klantselecties (super = geen beperking)
+// scope-ids voor orders/klanten (niet voor voorraad-teller)
 $scopeCustomerIds = [];
 if (!$isSuper) {
   $scopeCustomerIds = build_tree_ids($pdo, $myId);
   if (!$scopeCustomerIds) { $scopeCustomerIds = [$myId]; }
 }
 
-// --------- Tellers ----------
-
-/**
- * ACTIEVE SIMs
- * Definitie: SIM is toegewezen aan een eindklant (users.role='customer') en
- * de LAATSTE order voor die SIM heeft status 'completed'.
- * (We pakken de laatste order via MAX(o.id) als proxy voor meest recente.)
- */
+// ---------- Teller: Actieve SIM's (laatste order completed + sim bij eindklant) ----------
 try {
   if ($isSuper) {
-    $sqlActiveSims = "
+    $sql = "
       SELECT COUNT(DISTINCT s.id)
       FROM sims s
       JOIN users u ON u.id = s.assigned_to_user_id AND u.role = 'customer'
-      JOIN (
-        SELECT sim_id, MAX(id) AS last_order_id
-        FROM orders
-        GROUP BY sim_id
-      ) lo ON lo.sim_id = s.id
+      JOIN (SELECT sim_id, MAX(id) AS last_order_id FROM orders GROUP BY sim_id) lo ON lo.sim_id = s.id
       JOIN orders o ON o.id = lo.last_order_id AND o.status = 'completed'
     ";
-    $st = $pdo->prepare($sqlActiveSims);
+    $st = $pdo->prepare($sql);
     $st->execute();
   } else {
     $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $sqlActiveSims = "
+    $sql = "
       SELECT COUNT(DISTINCT s.id)
       FROM sims s
       JOIN users u ON u.id = s.assigned_to_user_id AND u.role = 'customer'
-      JOIN (
-        SELECT sim_id, MAX(id) AS last_order_id
-        FROM orders
-        GROUP BY sim_id
-      ) lo ON lo.sim_id = s.id
+      JOIN (SELECT sim_id, MAX(id) AS last_order_id FROM orders GROUP BY sim_id) lo ON lo.sim_id = s.id
       JOIN orders o ON o.id = lo.last_order_id AND o.status = 'completed'
       WHERE u.id IN ($ph)
     ";
-    $st = $pdo->prepare($sqlActiveSims);
+    $st = $pdo->prepare($sql);
     $st->execute($scopeCustomerIds);
   }
   $activeSims = (int)$st->fetchColumn();
@@ -98,49 +81,54 @@ try {
   $activeSims = 0;
 }
 
-/**
- * SIMs op voorraad
- * Niet 'retired' én geen order met status in ('concept','awaiting_activation','completed') aan die SIM (dus vrij beschikbaar).
- * Voor reseller/sub-reseller beperken we tot SIMs in eigen keten: assigned_to_user_id is NULL of binnen scope.
- */
+// ---------- Teller: SIM's op voorraad ----------
+// Definitie: niet retired EN géén order met status in ('concept','awaiting_activation','completed').
+// Super-admin: ALLE voorraad; Reseller/Sub-reseller: ALLEEN eigen voorraad (assigned_to_user_id = $myId).
 try {
-  $params = [];
-  $whereStock = " (s.status IS NULL OR s.status <> 'retired') ";
-  if (!$isSuper) {
-    $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $whereStock .= " AND (s.assigned_to_user_id IS NULL OR s.assigned_to_user_id IN ($ph))";
-    array_push($params, ...$scopeCustomerIds);
+  if ($isSuper) {
+    $sql = "
+      SELECT COUNT(*)
+      FROM sims s
+      WHERE (s.status IS NULL OR s.status <> 'retired')
+        AND NOT EXISTS (
+          SELECT 1 FROM orders o
+          WHERE o.sim_id = s.id
+            AND o.status IN ('concept','awaiting_activation','completed')
+        )
+    ";
+    $st = $pdo->prepare($sql);
+    $st->execute();
+  } else {
+    $sql = "
+      SELECT COUNT(*)
+      FROM sims s
+      WHERE (s.status IS NULL OR s.status <> 'retired')
+        AND s.assigned_to_user_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM orders o
+          WHERE o.sim_id = s.id
+            AND o.status IN ('concept','awaiting_activation','completed')
+        )
+    ";
+    $st = $pdo->prepare($sql);
+    $st->execute([$myId]);
   }
-  $sqlStock = "
-    SELECT COUNT(*)
-    FROM sims s
-    WHERE $whereStock
-      AND NOT EXISTS (
-        SELECT 1 FROM orders o
-        WHERE o.sim_id = s.id AND o.status IN ('concept','awaiting_activation','completed')
-      )
-  ";
-  $st = $pdo->prepare($sqlStock);
-  $st->execute($params);
   $stockSims = (int)$st->fetchColumn();
 } catch (Throwable $e) {
   echo '<div class="alert alert-warning">Voorraad tellen mislukt: '.e($e->getMessage()).'</div>';
   $stockSims = 0;
 }
 
-/**
- * Wachten op activatie
- * orders.status = 'awaiting_activation' gefilterd op scope (klant in boom)
- */
+// ---------- Teller: Wachten op activatie ----------
 try {
   if ($isSuper) {
-    $sqlAwait = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation'";
-    $st = $pdo->prepare($sqlAwait);
+    $sql = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation'";
+    $st = $pdo->prepare($sql);
     $st->execute();
   } else {
     $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $sqlAwait = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation' AND o.customer_id IN ($ph)";
-    $st = $pdo->prepare($sqlAwait);
+    $sql = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation' AND o.customer_id IN ($ph)";
+    $st = $pdo->prepare($sql);
     $st->execute($scopeCustomerIds);
   }
   $awaiting = (int)$st->fetchColumn();
@@ -149,19 +137,16 @@ try {
   $awaiting = 0;
 }
 
-/**
- * Actieve klanten
- * users.role='customer' AND is_active=1 (met scope)
- */
+// ---------- Teller: Actieve klanten ----------
 try {
   if ($isSuper) {
-    $sqlActiveCustomers = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active = 1";
-    $st = $pdo->prepare($sqlActiveCustomers);
+    $sql = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active = 1";
+    $st = $pdo->prepare($sql);
     $st->execute();
   } else {
     $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $sqlActiveCustomers = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active=1 AND id IN ($ph)";
-    $st = $pdo->prepare($sqlActiveCustomers);
+    $sql = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active=1 AND id IN ($ph)";
+    $st = $pdo->prepare($sql);
     $st->execute($scopeCustomerIds);
   }
   $activeCustomers = (int)$st->fetchColumn();
@@ -203,7 +188,12 @@ echo function_exists('flash_output') ? flash_output() : '';
         </div>
       </div>
       <div class="card-footer bg-transparent border-0">
-        <a class="stretched-link" href="index.php?route=sims_list&status=stock">Bekijken</a>
+        <?php if ($isSuper): ?>
+          <a class="stretched-link" href="index.php?route=sims_list&status=stock">Bekijken</a>
+        <?php else: ?>
+          <!-- Je eigen voorraad; dezelfde lijst kan via filter op owner=myId -->
+          <a class="stretched-link" href="index.php?route=sims_list&status=stock&owner=me">Bekijken</a>
+        <?php endif; ?>
       </div>
     </div>
   </div>
