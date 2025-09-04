@@ -148,6 +148,11 @@ try {
       </ul>
     </div>
     <?php endif; ?>
+    <?php if (has_role('Super-admin')): ?>
+<li class="nav-item">
+  <a class="nav-link" href="index.php?route=vendor_orders">Order activatie</a>
+</li>
+<?php endif; ?>
   </div>
 </nav>
 
