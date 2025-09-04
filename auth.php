@@ -38,6 +38,15 @@ if (!function_exists('auth_login')) {
     }
 }
 
+
+<?php
+function has_role(string $role): bool {
+    if (!isset($_SESSION['user']) || empty($_SESSION['user']['role'])) {
+        return false;
+    }
+    return $_SESSION['user']['role'] === $role;
+}
+
 /**
  * Uitloggen: wis login & impersonatie-informatie uit de sessie.
  */
@@ -170,12 +179,4 @@ if (!function_exists('is_manager')) {
             || (defined('ROLE_RESELLER') && $r === ROLE_RESELLER)
             || (defined('ROLE_SUBRESELLER') && $r === ROLE_SUBRESELLER);
     }
-}
-
-<?php
-function has_role(string $role): bool {
-    if (!isset($_SESSION['user']) || empty($_SESSION['user']['role'])) {
-        return false;
-    }
-    return $_SESSION['user']['role'] === $role;
 }
