@@ -1,6 +1,10 @@
 <?php
 // pages/dashboard.php — Tegels met correcte scoping voor VOORRAAD
+
 require_once __DIR__ . '/../helpers.php';
+require_login();
+$db = db(); // ← BELANGRIJK
+$user = auth_user();
 app_session_start();
 
 $me = auth_user();

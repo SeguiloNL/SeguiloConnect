@@ -87,6 +87,12 @@ if ($route === 'login' && auth_user()) {
 // ---- 5) Header tonen ----
 include __DIR__ . '/views/header.php';
 
+if (SC_DEBUG && ($route === 'dashboard')) {
+    echo "<div style='padding:8px 12px;background:#103;color:#cfe;border-bottom:1px solid #234'>
+            DEBUG: route=dashboard, user=" . e(auth_user()['email'] ?? '—') . "
+          </div>";
+}
+
 try {
     if (!isset($routes[$route])) { throw new RuntimeException("Unknown route: $route"); }
     $file = __DIR__ . '/' . $routes[$route];
