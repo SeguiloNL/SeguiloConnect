@@ -30,9 +30,6 @@ set_error_handler(function($severity,$message,$file,$line){
 
 
 
-
-
-
 // index.php — hoofdrouting voor SeguiloConnect portal
 ini_set('display_errors', '1');
 ini_set('display_startup_errors', '1');
