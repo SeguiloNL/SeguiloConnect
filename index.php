@@ -8,6 +8,9 @@ if (function_exists('app_session_start')) {
     app_session_start();
 }
 
+require_once __DIR__ . '/helpers.php';
+app_session_start();
+include __DIR__ . '/views/header.php';
 
 // PANIC MODE index.php — minimal debug loader to locate the exact crash point
 // Put this in webroot as index.php (backup your original).
@@ -38,6 +41,7 @@ mark('B:after-helpers');
 
 try {
   mark('H:before-header');
+
   include __DIR__ . '/views/header.php';
   mark('H:after-header');
 
