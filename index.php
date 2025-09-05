@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/helpers.php';
+app_session_start(); // zet dit meteen na de require
 
 // START SESSIE ZO VROEG MOGELIJK
 if (function_exists('app_session_start')) {
