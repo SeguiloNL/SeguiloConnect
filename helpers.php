@@ -1,9 +1,15 @@
 <?php
 /**
  * helpers.php — centrale helpers voor Seguilo Connect
- * - Zorgt voor stabiele sessies (1 vaste sessienaam)
- * - Leest config in
- * - Biedt CSRF, DB, auth_user en kleine util-functies
+ * - Stabiele sessies (vaste sessienaam, tolerant als headers al zijn verzonden)
+ * - Config laden
+ * - CSRF helpers
+ * - DB (PDO singleton)
+ * - Auth helpers (auth_user)
+ * - Flash messages
+ * - Kleine util-functies
+ *
+ * Let op: GEEN whitespace/echo vóór deze PHP-tag, om headers/sessieproblemen te voorkomen.
  */
 
 /* ===========================
@@ -13,93 +19,67 @@
 if (!function_exists('app_session_start')) {
     function app_session_start(): void
     {
+        // Al actief? Klaar.
         if (session_status() === PHP_SESSION_ACTIVE) {
             return;
         }
 
-        // Vaste sessienaam om conflicten met andere PHP-sites op dezelfde host te voorkomen
-        if (session_name() !== 'seguilo_sess') {
-            session_name('seguilo_sess');
-        }
+        $sessionName = 'seguilo_sess';
 
-        // Veilige cookie-instellingen
-        $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-            || (($_SERVER['SERVER_PORT'] ?? '') == 443);
-
-        session_set_cookie_params([
-            'lifetime' => 0,
-            'path'     => '/',
-            // Tip: gebruik óf 1 vaste host via .htaccess, óf zet expliciet een domein:
-            // 'domain'   => '.seguilo-connect.nl',
-            'secure'   => $isHttps,
-            'httponly' => true,
-            'samesite' => 'Lax',
-        ]);
-
-        // voorkom URL-sessies
-        if (function_exists('ini_set')) {
-            @ini_set('session.use_trans_sid', '0');
-            @ini_set('session.use_cookies', '1');
-            @ini_set('session.use_only_cookies', '1');
-        }
-
-        @session_start();
-
-        // Oude PHPSESSID-cookie opruimen (kan dubbele sessies veroorzaken)
-        if (!empty($_COOKIE['PHPSESSID'])) {
-            $past = time() - 3600;
-            foreach (['/','/index.php',''] as $p) {
-                @setcookie('PHPSESSID', '', $past, $p, '', $isHttps, true);
+        // Alleen cookie-parameters/naam aanpassen als headers nog niet zijn verzonden
+        if (!headers_sent()) {
+            if (session_name() !== $sessionName) {
+                session_name($sessionName);
             }
-            unset($_COOKIE['PHPSESSID']);
+            $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+            $params = [
+                'lifetime' => 0,
+                'path'     => '/',
+                'domain'   => '',
+                'secure'   => $secure,
+                'httponly' => true,
+                'samesite' => 'Lax',
+            ];
+            if (PHP_VERSION_ID >= 70300) {
+                session_set_cookie_params($params);
+            } else {
+                // Oudere PHP: samesite via path-hack
+                session_set_cookie_params(
+                    $params['lifetime'],
+                    $params['path'].'; samesite='.$params['samesite'],
+                    $params['domain'],
+                    $params['secure'],
+                    $params['httponly']
+                );
+            }
+        } else {
+            // Headers al verzonden → sessienaam/params níet meer wijzigen.
+            // We starten de sessie met bestaande instellingen.
+        }
+
+        // Start de sessie (veilig bij herhaalde aanroepen)
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            @session_start();
         }
     }
 }
 
-if (!function_exists('e')) {
-    /** Veilig escapen voor HTML output */
-    function e(?string $v): string
-    {
-        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
-    }
-}
+/* ===========================
+ *  Config
+ * =========================== */
 
 if (!function_exists('app_config')) {
-    /** Laad config.php éénmalig in (verwacht array return) */
     function app_config(): array
     {
-        static $cfg = null;
-        if ($cfg !== null) return $cfg;
+        static $cfg;
+        if (is_array($cfg)) return $cfg;
 
         $file = __DIR__ . '/config.php';
         if (!is_file($file)) {
-            // fallback: probeer 1 map omhoog
-            $alt = dirname(__DIR__) . '/config.php';
-            if (is_file($alt)) $file = $alt;
+            return $cfg = [];
         }
-        if (!is_file($file)) {
-            throw new RuntimeException('config.php niet gevonden.');
-        }
-        $cfg = require $file;
-        if (!is_array($cfg)) {
-            throw new RuntimeException('config.php moet een array retourneren.');
-        }
-        return $cfg;
-    }
-}
-
-if (!function_exists('base_url')) {
-    /** Bepaal basis-URL (uit config of afgeleid) */
-    function base_url(): string
-    {
-        $cfg = app_config();
-        if (!empty($cfg['app']['base_url'])) {
-            return rtrim($cfg['app']['base_url'], '/');
-        }
-        $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-        $host  = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $dir   = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/.');
-        return rtrim($https . '://' . $host . ($dir ? $dir : ''), '/');
+        $val = require $file;
+        return $cfg = (is_array($val) ? $val : []);
     }
 }
 
@@ -135,17 +115,18 @@ if (!function_exists('verify_csrf')) {
         if (!$sessionToken || !$posted || !hash_equals((string)$sessionToken, (string)$posted)) {
             throw new RuntimeException('Ongeldig CSRF-token.');
         }
+        // Token roteren na succes? Zou kunnen:
+        // $_SESSION['_csrf_token'] = bin2hex(random_bytes(32));
     }
 }
 
 /* ===========================
- *  Database connectie
+ *  Database (PDO)
  * =========================== */
 
 if (!function_exists('db')) {
     /**
      * db(): gedeelde PDO-verbinding (singleton per request)
-     * Probeert bekende paden, valt terug op config.php['db']
      */
     function db(): PDO
     {
@@ -153,7 +134,7 @@ if (!function_exists('db')) {
             return $GLOBALS['pdo'];
         }
 
-        // 1) Probeer veelgebruikte include-paden die $pdo zetten
+        // 1) Optioneel: bekende paden die $pdo zetten
         foreach ([__DIR__ . '/db.php', __DIR__ . '/includes/db.php', __DIR__ . '/config/db.php'] as $f) {
             if (is_file($f)) {
                 require_once $f;
@@ -169,49 +150,70 @@ if (!function_exists('db')) {
 
         if (!empty($db['dsn'])) {
             $pdo = new PDO(
-                $db['dsn'],
-                $db['user'] ?? null,
-                $db['pass'] ?? null,
+                (string)$db['dsn'],
+                (string)($db['user'] ?? ''),
+                (string)($db['pass'] ?? ''),
                 [
                     PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
                     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                     PDO::ATTR_EMULATE_PREPARES   => false,
                 ]
             );
-            return $GLOBALS['pdo'] = $pdo;
+        } else {
+            $host = (string)($db['host'] ?? 'localhost');
+            $name = (string)($db['name'] ?? '');
+            $user = (string)($db['user'] ?? '');
+            $pass = (string)($db['pass'] ?? '');
+            $charset = (string)($db['charset'] ?? 'utf8mb4');
+
+            if ($name === '' || $user === '') {
+                throw new RuntimeException('DB-config onvolledig (name/user ontbreekt).');
+            }
+
+            $dsn = "mysql:host={$host};dbname={$name};charset={$charset}";
+            $pdo = new PDO(
+                $dsn,
+                $user,
+                $pass,
+                [
+                    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::ATTR_EMULATE_PREPARES   => false,
+                ]
+            );
         }
 
-        $host    = $db['host'] ?? 'localhost';
-        $name    = $db['name'] ?? ($db['database'] ?? '');
-        $user    = $db['user'] ?? ($db['username'] ?? '');
-        $pass    = $db['pass'] ?? ($db['password'] ?? '');
-        $charset = $db['charset'] ?? 'utf8mb4';
-
-        if ($name === '') {
-            throw new RuntimeException('DB-naam ontbreekt in config.');
-        }
-
-        $pdo = new PDO(
-            "mysql:host={$host};dbname={$name};charset={$charset}",
-            $user,
-            $pass,
-            [
-                PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES   => false,
-            ]
-        );
         return $GLOBALS['pdo'] = $pdo;
     }
 }
 
-// --- Flash messages ---
-if (!function_exists('flash_set')) {
-    /**
-     * Sla een melding op voor de volgende request.
-     * $type: 'success' | 'info' | 'warning' | 'danger'
-     */
-    function flash_set(string $type, string $message): void
+/* ===========================
+ *  Kleine utils
+ * =========================== */
+
+if (!function_exists('e')) {
+    /** HTML-escape */
+    function e(?string $v): string
+    {
+        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('url')) {
+    /** Eenvoudige URL-builder met query */
+    function url(string $route, array $qs = []): string
+    {
+        $q = $qs ? ('&' . http_build_query($qs)) : '';
+        return 'index.php?route=' . rawurlencode($route) . $q;
+    }
+}
+
+/* ===========================
+ *  Flash-meldingen
+ * =========================== */
+
+if (!function_exists('flash')) {
+    function flash(string $type, string $message): void
     {
         app_session_start();
         $_SESSION['_flash'][] = ['type' => $type, 'message' => $message];
@@ -219,7 +221,7 @@ if (!function_exists('flash_set')) {
 }
 
 if (!function_exists('flash_all')) {
-    /** Haal alle flash-berichten op en wis ze direct. */
+    /** Haal ALLE flash-berichten op en leeg de buffer. */
     function flash_all(): array
     {
         app_session_start();
@@ -253,50 +255,58 @@ if (!function_exists('flash_output')) {
 if (!function_exists('auth_user')) {
     /**
      * auth_user(): haal de ingelogde gebruiker op via $_SESSION['user_id'].
-     * - Per-request cache (op basis van sessie user_id)
+     * Cached per request.
      */
     function auth_user(): ?array
     {
         app_session_start();
-        if (empty($_SESSION['user_id'])) {
-            return null;
+
+        static $cached = null;
+        if ($cached !== null) return $cached;
+
+        $id = $_SESSION['user_id'] ?? null;
+        if (!$id) return $cached = null;
+
+        $pdo = db();
+        $st = $pdo->prepare('SELECT * FROM users WHERE id = ? LIMIT 1');
+        $st->execute([(int)$id]);
+        $user = $st->fetch(PDO::FETCH_ASSOC) ?: null;
+
+        // Optioneel: blokkeer inactieve accounts
+        if ($user && isset($user['is_active']) && (int)$user['is_active'] === 0) {
+            // user is niet actief → log uit
+            unset($_SESSION['user_id']);
+            return $cached = null;
         }
 
-        static $cachedUserId = null;
-        static $cachedUser   = null;
-
-        if ($cachedUser !== null && $cachedUserId === (int)$_SESSION['user_id']) {
-            return $cachedUser;
-        }
-
-        try {
-            $pdo = db();
-            $st  = $pdo->prepare(
-                "SELECT id, name, email, role, is_active
-                 FROM users
-                 WHERE id = ?
-                 LIMIT 1"
-            );
-            $st->execute([ (int)$_SESSION['user_id'] ]);
-            $user = $st->fetch(PDO::FETCH_ASSOC) ?: null;
-        } catch (Throwable $e) {
-            // Bij DB-probleem: beschouw als niet ingelogd
-            return null;
-        }
-
-        $cachedUserId = (int)$_SESSION['user_id'];
-        $cachedUser   = $user;
-
-        return $user;
+        return $cached = $user;
     }
 }
 
-/* ===========================
- *  Kleine util-functies
- * =========================== */
+if (!function_exists('require_login')) {
+    /** Redirect naar login als er geen user is. */
+    function require_login(): void
+    {
+        if (!auth_user()) {
+            redirect('index.php?route=login');
+        }
+    }
+}
 
-if (!function_exists('role_label')) {
-    function role_label(?string $role): string
+if (!function_exists('is_super_admin')) {
+    function is_super_admin(): bool
+    {
+        $u = auth_user();
+        $r = $u['role'] ?? '';
+        if ($r === 'super_admin') return true;
+        // Eventuele constante-rollen ondersteunen
+        if (defined('ROLE_SUPER') && $r === ROLE_SUPER) return true;
+        return false;
+    }
+}
+
+if (!function_exists('user_display_role')) {
+    function user_display_role(?string $role): string
     {
         $map = [
             'super_admin'  => 'Super-admin',
@@ -304,63 +314,48 @@ if (!function_exists('role_label')) {
             'sub_reseller' => 'Sub-reseller',
             'customer'     => 'Eindklant',
         ];
-        // Eventuele constanten ondersteunen
-        if (defined('ROLE_SUPER') && $role === ROLE_SUPER)               return 'Super-admin';
-        if (defined('ROLE_RESELLER') && $role === ROLE_RESELLER)         return 'Reseller';
-        if (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER)   return 'Sub-reseller';
-        if (defined('ROLE_CUSTOMER') && $role === ROLE_CUSTOMER)         return 'Eindklant';
+        // Eventuele constanten
+        if (defined('ROLE_SUPER') && $role === ROLE_SUPER)             return 'Super-admin';
+        if (defined('ROLE_RESELLER') && $role === ROLE_RESELLER)       return 'Reseller';
+        if (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER) return 'Sub-reseller';
+        if (defined('ROLE_CUSTOMER') && $role === ROLE_CUSTOMER)       return 'Eindklant';
 
         return $map[$role] ?? (string)$role;
     }
 }
 
+/* ===========================
+ *  Redirect
+ * =========================== */
+
 if (!function_exists('redirect')) {
-  function redirect(string $url, int $status = 302): void
-  {
-    // Normaliseer URL (relatief naar index.php toelaten)
-    if ($url === '') { $url = 'index.php'; }
+    function redirect(string $url, int $status = 302): void
+    {
+        if ($url === '') { $url = 'index.php'; }
 
-    // Als headers nog niet verzonden zijn: gewone header-redirect
-    if (!headers_sent()) {
-      header('Location: ' . $url, true, $status);
-      exit;
+        if (!headers_sent()) {
+            header('Location: ' . $url, true, $status);
+            exit;
+        }
+
+        // Fallback als headers al weg zijn
+        $safeUrl = htmlspecialchars($url, ENT_QUOTES, 'UTF-8');
+        echo '<script>window.location.href = ' . json_encode($url) . ';</script>';
+        echo '<noscript><meta http-equiv="refresh" content="0;url=' . $safeUrl . '"></noscript>';
+        exit;
     }
-
-    // Fallback: headers al verzonden -> JS + <noscript> refresh
-    $safeUrl = htmlspecialchars($url, ENT_QUOTES, 'UTF-8');
-    echo '<script>window.location.href = ' . json_encode($url) . ';</script>';
-    echo '<noscript><meta http-equiv="refresh" content="0;url=' . $safeUrl . '"></noscript>';
-    exit;
-  }
 }
 
-// --- Backwards-compat shims (oude functienamen) ---
+/* ===========================
+ *  Backwards-compat shims
+ * =========================== */
+
 if (!function_exists('is_logged_in')) {
     function is_logged_in(): bool { return (bool) auth_user(); }
-}
-if (!function_exists('user')) {
-    function user() { return auth_user(); }
 }
 if (!function_exists('has_role')) {
     function has_role(string $role): bool {
         $u = auth_user();
-        if (!$u) return false;
-        if ($role === 'super_admin') return ($u['role'] ?? '') === 'super_admin';
-        if ($role === 'reseller') return ($u['role'] ?? '') === 'reseller';
-        if ($role === 'sub_reseller') return ($u['role'] ?? '') === 'sub_reseller';
-        if ($role === 'end_customer') return ($u['role'] ?? '') === 'end_customer';
-        return false;
-    }
-}
-if (!function_exists('is_super_admin')) {
-    function is_super_admin(): bool { return has_role('super_admin'); }
-}
-if (!function_exists('require_super_admin')) {
-    function require_super_admin(): void {
-        $u = auth_user();
-        if (!$u || ($u['role'] ?? '') !== 'super_admin') {
-            http_response_code(403);
-            exit('Forbidden');
-        }
+        return $u ? (($u['role'] ?? '') === $role) : false;
     }
 }
