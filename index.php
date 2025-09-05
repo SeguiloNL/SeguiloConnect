@@ -1,4 +1,13 @@
 <?php
+
+require_once __DIR__ . '/helpers.php';
+
+// START SESSIE ZO VROEG MOGELIJK
+if (function_exists('app_session_start')) {
+    app_session_start();
+}
+
+
 // PANIC MODE index.php — minimal debug loader to locate the exact crash point
 // Put this in webroot as index.php (backup your original).
 // It prints markers A/B/C/D so you can see where execution stops.
