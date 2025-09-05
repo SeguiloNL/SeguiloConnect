@@ -1,6 +1,9 @@
 <?php
+echo "<div style='background:#ffc;padding:4px'>DEBUG start header.php</div>";
 $u = auth_user();
 $config = require __DIR__ . '/../config.php';
+
+
 
 // Role-flags
 $role     = $u['role'] ?? null;
@@ -119,3 +122,6 @@ $isMgr    = ($isSuper || $isRes || $isSubRes);
 <?php endif; ?>
 
 <div class="container mt-4">
+
+<?php
+echo "<div style='background:#cfc;padding:4px'>DEBUG end header.php</div>";
