@@ -1,244 +1,109 @@
 <?php
+declare(strict_types=1);
 
-//DEBUG
+/**
+ * SeguiloConnect — index.php (opgeschoond)
+ * - Gebruikt auth_user() i.p.v. is_logged_in()
+ * - Veilige router met whitelist
+ * - Fijnere foutweergave in debug
+ */
 
-define('SC_DEBUG', true);
-error_reporting(E_ALL);
-ini_set('display_errors', '1');
-
-// Log ook naar file (handig als er niets getoond wordt)
-ini_set('log_errors', '1');
-ini_set('error_log', __DIR__ . '/storage/logs/php-error.log');
-if (!is_dir(__DIR__ . '/storage/logs')) { @mkdir(__DIR__ . '/storage/logs', 0775, true); }
-
-// Vang fatals
-register_shutdown_function(function () {
-    $e = error_get_last();
-    if ($e && in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
-        http_response_code(500);
-        echo "<pre style='padding:16px;background:#111;color:#eee'>FATAL: {$e['message']} in {$e['file']}:{$e['line']}</pre>";
+// ==== DEBUG (zet tijdelijk aan tijdens testen) ===============================
+if (!defined('SC_DEBUG')) {
+    // Zet op true voor lokale debug; false in productie
+    define('SC_DEBUG', true);
+}
+if (SC_DEBUG) {
+    error_reporting(E_ALL);
+    ini_set('display_errors', '1');
+    ini_set('log_errors', '1');
+    if (!is_dir(__DIR__ . '/storage/logs')) {
+        @mkdir(__DIR__ . '/storage/logs', 0775, true);
     }
-});
-set_error_handler(function($severity,$message,$file,$line){
-    // gooi warnings/notices ook omhoog in debug
-    if (error_reporting()) {
+    ini_set('error_log', __DIR__ . '/storage/logs/php-error.log');
+
+    // Toon ook fatals/warnings netjes op de pagina
+    set_error_handler(function ($severity, $message, $file, $line) {
+        if (!(error_reporting() & $severity)) return;
         throw new ErrorException($message, 0, $severity, $file, $line);
-    }
-});
+    });
+    register_shutdown_function(function () {
+        $e = error_get_last();
+        if ($e && in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
+            http_response_code(500);
+            echo "<pre style='padding:16px;background:#111;color:#eee'>FATAL: {$e['message']} in {$e['file']}:{$e['line']}</pre>";
+        }
+    });
+} else {
+    error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT);
+    ini_set('display_errors', '0');
+}
 
-// EINDE DEBUG
+// ==== BOOTSTRAP ==============================================================
+require_once __DIR__ . '/helpers.php'; // bevat o.a. db(), auth_user(), require_login(), url(), e()
 
-
-
-// index.php — hoofdrouting voor SeguiloConnect portal
-ini_set('display_errors', '1');
-ini_set('display_startup_errors', '1');
-error_reporting(E_ALL);
-
-require __DIR__ . '/helpers.php';
-
-app_session_start();
-
-// ---- 1) Bepaal route ----
+// Bepaal route (login of dashboard als default op basis van auth)
 $user  = auth_user();
 $route = $_GET['route'] ?? ($user ? 'dashboard' : 'login');
+
+// Whitelist → bestandspaden
 $routes = [
-  'login' => 'pages/login.php',
-  'dashboard' => 'pages/dashboard.php',
-  'profile' => 'pages/profile.php',
+    // publiek
+    'login'                 => 'pages/login.php',
+    'do_login'              => 'pages/do_login.php',
+    'logout'                => 'pages/logout.php',
+
+    // ingelogd
+    'dashboard'             => 'pages/dashboard.php',
+    'profile'               => 'pages/profile.php',
+    'do_change_password'    => 'pages/do_change_password.php',
+
+    // admin (pagina’s zelf doen require_super_admin();)
+    'admin_users'           => 'admin/users.php',
+    'admin_user_edit'       => 'admin/user_edit.php',
+    'admin_do_user_save'    => 'admin/do_user_save.php',
+    'admin_do_user_toggle'  => 'admin/do_user_toggle.php',
+
+    // debug helpers (optioneel — alleen in debug gebruiken)
+    '_whoami'               => 'pages/_whoami.php',
+    '_phpinfo'              => 'pages/_phpinfo.php',
 ];
 
-// ---- 2) Early routes (POST/redirect handlers) ----
-$earlyRoutes = [
-    'do_login',
-    'logout',
-    'impersonate_start',
-    'impersonate_stop',
-    'sim_bulk_assign',
-    'sim_bulk_delete',
-    'sim_bulk_action',
-    'plan_delete',
-    'order_delete',
-    'user_delete',
-];
-
-if ($route && in_array($route, $earlyRoutes, true)) {
-    $file = __DIR__ . '/pages/' . basename($route) . '.php';
-    if (is_file($file)) {
-        include $file;
-        exit;
-    } else {
-        http_response_code(404);
-        echo "Pagina niet gevonden.";
-        exit;
-    }
-}
-
-// ---- 3) Default route: dashboard als ingelogd, login anders ----
-if (!$route) {
-    $route = auth_user() ? 'dashboard' : 'login';
-}
-
-// ---- 4) Als al ingelogd, nooit loginpagina tonen ----
-if ($route === 'login' && auth_user()) {
-    header('Location: index.php?route=dashboard');
-    exit;
-}
-
-// ---- 5) Header tonen ----
+// ==== RENDER ================================================================
 include __DIR__ . '/views/header.php';
 
-if (SC_DEBUG && ($route === 'dashboard')) {
-    echo "<div style='padding:8px 12px;background:#103;color:#cfe;border-bottom:1px solid #234'>
-            DEBUG: route=dashboard, user=" . e(auth_user()['email'] ?? '—') . "
-          </div>";
-}
-
 try {
-    if (!isset($routes[$route])) { throw new RuntimeException("Unknown route: $route"); }
+    if (!isset($routes[$route])) {
+        throw new RuntimeException("Unknown route: {$route}");
+    }
     $file = __DIR__ . '/' . $routes[$route];
-    if (!is_file($file)) { throw new RuntimeException("Route file missing: $file"); }
+    if (!is_file($file)) {
+        throw new RuntimeException("Route file missing: {$file}");
+    }
+
+    // In debug, toon bovenin kleine hint wie er ingelogd is
+    if (SC_DEBUG) {
+        $hintUser = $user['email'] ?? '—';
+        echo "<div style='padding:8px 12px;background:#103;color:#cfe;border-bottom:1px solid #234'>
+                DEBUG: route=" . e($route) . ", user=" . e($hintUser) . "
+              </div>";
+    }
+
     require $file;
+
 } catch (Throwable $t) {
     http_response_code(500);
-    echo "<pre style='padding:16px;background:#221;color:#fee'>Route crash: " . e($t->getMessage()) . "\n" . e($t->getFile()) . ':' . $t->getLine() . "</pre>";
-}
 
-// ---- 6) Router voor views/pages ----
-try {
-    switch ($route) {
-        case 'dashboard':
-            include __DIR__ . '/pages/dashboard.php';
-            break;
-
-        case 'login':
-            include __DIR__ . '/pages/login.php';
-            break;
-
-        case 'users_list':
-            include __DIR__ . '/pages/users_list.php';
-            break;
-
-        case 'user_add':
-            include __DIR__ . '/pages/user_add.php';
-            break;
-
-        case 'user_edit':
-            include __DIR__ . '/pages/user_edit.php';
-            break;
-
-        case 'sims_list':
-            include __DIR__ . '/pages/sims_list.php';
-            break;
-
-        case 'sim_add':
-            include __DIR__ . '/pages/sim_add.php';
-            break;
-
-        case 'sim_edit':
-            include __DIR__ . '/pages/sim_edit.php';
-            break;
-
-        case 'sim_delete':
-            require __DIR__ . '/pages/sim_delete.php';
-            break;    
-
-        case 'sim_assign':
-            include __DIR__ . '/pages/sim_assign.php';
-            break;
-
-        case 'plans_list':
-            include __DIR__ . '/pages/plans_list.php';
-            break;
-
-        case 'plan_add':
-            include __DIR__ . '/pages/plan_add.php';
-            break;
-
-        case 'plan_edit':
-            include __DIR__ . '/pages/plan_edit.php';
-            break;
-
-        case 'plan_duplicate':
-            include __DIR__ . '/pages/plan_duplicate.php';
-            break;
-
-        case 'orders_list':
-            include __DIR__ . '/pages/orders_list.php';
-            break;
-
-        case 'order_add':
-            include __DIR__ . '/pages/order_add.php';
-            break;
-
-        case 'order_edit':
-            include __DIR__ . '/pages/order_edit.php';
-            break;
-
-        case 'system_admin':
-            include __DIR__ . '/pages/system_admin.php';
-            break;
-
-        case 'forgot_password':
-            include __DIR__ . '/pages/forgot_password.php';
-            break;
-
-        case 'reset_password':
-            include __DIR__ . '/pages/reset_password.php';
-            break;
-
-        case 'order_cancel':
-            include __DIR__ . '/pages/order_cancel.php';
-            break;    
-
-        case 'ajax_sims_search':
-            require __DIR__ . '/pages/ajax_sims_search.php';
-            break;
-
-        case 'admin_users':           
-            require 'admin/users.php'; 
-            break;
-
-        case 'admin_user_edit':       
-            require 'admin/user_edit.php'; 
-            break;
-
-        case 'admin_do_user_save':    
-            require 'admin/do_user_save.php'; 
-            break;
-
-        case 'admin_do_user_toggle':  
-            require 'admin/do_user_toggle.php'; 
-            break;
-
-        case 'profile': 
-            require 'pages/profile.php'; 
-            break;
-
-        case 'do_change_password': 
-            require 'pages/do_change_password.php'; 
-            break;
-
-
-
-
-
-        case 'system_users':
-            require __DIR__ . '/pages/system_users.php';
-            break;
-
-        default:
-            // fallback: als ingelogd → dashboard, anders → login
-            if (auth_user()) {
-                include __DIR__ . '/pages/dashboard.php';
-            } else {
-                include __DIR__ . '/pages/login.php';
-            }
-            break;
+    if (SC_DEBUG) {
+        // Duidelijke debug-output
+        $msg = e($t->getMessage());
+        $file = e($t->getFile());
+        $line = (int)$t->getLine();
+        echo "<pre style='padding:16px;background:#221;color:#fee'>Route crash: {$msg}\n{$file}:{$line}</pre>";
+    } else {
+        // Productie: beknopt
+        echo "<div class='container'><h2>Er ging iets mis</h2><p>Probeer het later opnieuw.</p></div>";
     }
-} catch (Throwable $e) {
-    echo '<div class="alert alert-danger">Laden mislukt: ' . e($e->getMessage()) . '</div>';
 }
 
-// ---- 7) Footer tonen ----
 include __DIR__ . '/views/footer.php';
