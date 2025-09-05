@@ -1,4 +1,38 @@
 <?php
+
+//DEBUG
+
+define('SC_DEBUG', true);
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+
+// Log ook naar file (handig als er niets getoond wordt)
+ini_set('log_errors', '1');
+ini_set('error_log', __DIR__ . '/storage/logs/php-error.log');
+if (!is_dir(__DIR__ . '/storage/logs')) { @mkdir(__DIR__ . '/storage/logs', 0775, true); }
+
+// Vang fatals
+register_shutdown_function(function () {
+    $e = error_get_last();
+    if ($e && in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
+        http_response_code(500);
+        echo "<pre style='padding:16px;background:#111;color:#eee'>FATAL: {$e['message']} in {$e['file']}:{$e['line']}</pre>";
+    }
+});
+set_error_handler(function($severity,$message,$file,$line){
+    // gooi warnings/notices ook omhoog in debug
+    if (error_reporting()) {
+        throw new ErrorException($message, 0, $severity, $file, $line);
+    }
+});
+
+// EINDE DEBUG
+
+
+
+
+
+
 // index.php — hoofdrouting voor SeguiloConnect portal
 ini_set('display_errors', '1');
 ini_set('display_startup_errors', '1');
@@ -152,7 +186,7 @@ try {
         case 'admin_do_user_save':    
             require 'admin/do_user_save.php'; 
             break;
-            
+
         case 'admin_do_user_toggle':  
             require 'admin/do_user_toggle.php'; 
             break;
