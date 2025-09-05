@@ -1,6 +1,5 @@
 <?php
-// views/header.php
-$u = function_exists('auth_user') ? auth_user() : null;
+$u = auth_user();
 $config = require __DIR__ . '/../config.php';
 
 // Role-flags
@@ -31,7 +30,7 @@ $isMgr    = ($isSuper || $isRes || $isSubRes);
 <body>
 <nav class="navbar navbar-expand-lg navbar-custom mb-0">
   <div class="container-fluid">
-    <a class="navbar-brand d-flex align-items-center gap-2" href="index.php?route=dashboard">
+    <a class="navbar-brand" href="index.php?route=dashboard">
       <?php if (!empty($config['app']['logo'])): ?>
         <img src="<?= e($config['app']['logo']) ?>" alt="Logo" height="30">
       <?php else: ?>
@@ -43,74 +42,66 @@ $isMgr    = ($isSuper || $isRes || $isSubRes);
       <span class="navbar-toggler-icon"></span>
     </button>
 
+    <?php if ($u): ?>
     <div class="collapse navbar-collapse" id="nav">
       <ul class="navbar-nav me-auto mb-2 mb-lg-0">
         <!-- Dashboard -->
         <li class="nav-item"><a class="nav-link" href="index.php?route=dashboard">Dashboard</a></li>
 
-        <?php if ($u): ?>
-          <!-- Klanten -->
-          <?php if ($isMgr): ?>
-            <li class="nav-item"><a class="nav-link" href="index.php?route=users_list">Klanten</a></li>
-          <?php endif; ?>
+        <!-- Klanten -->
+        <?php if ($isMgr): ?>
+          <li class="nav-item"><a class="nav-link" href="index.php?route=users_list">Klanten</a></li>
+        <?php endif; ?>
 
-          <!-- Abonnementen (alleen Super-admin) -->
-          <?php if ($isSuper): ?>
-            <li class="nav-item"><a class="nav-link" href="index.php?route=plans_list">Abonnementen</a></li>
-          <?php endif; ?>
+        <!-- Abonnementen -->
+        <?php if ($isSuper): ?>
+          <li class="nav-item"><a class="nav-link" href="index.php?route=plans_list">Abonnementen</a></li>
+        <?php endif; ?>
 
-          <!-- Simkaarten (hoofdmenu) -->
-          <?php if ($isMgr): ?>
-            <li class="nav-item"><a class="nav-link" href="index.php?route=sims_list">Simkaarten</a></li>
-          <?php endif; ?>
+        <!-- Simkaarten (nieuw hoofdmenu item) -->
+        <?php if ($isMgr): ?>
+          <li class="nav-item"><a class="nav-link" href="index.php?route=sims_list">Simkaarten</a></li>
+        <?php endif; ?>
 
-          <!-- Bestellen -->
-          <?php if ($isMgr): ?>
-            <li class="nav-item"><a class="nav-link" href="index.php?route=orders_list">Bestellen</a></li>
-          <?php else: ?>
-            <li class="nav-item"><a class="nav-link" href="index.php?route=orders_list">Mijn bestellingen</a></li>
-          <?php endif; ?>
+        <!-- Bestellen -->
+        <?php if ($isMgr): ?>
+          <li class="nav-item"><a class="nav-link" href="index.php?route=orders_list">Bestellen</a></li>
+        <?php else: ?>
+          <li class="nav-item"><a class="nav-link" href="index.php?route=orders_list">Mijn bestellingen</a></li>
         <?php endif; ?>
       </ul>
 
-      <!-- Rechts -->
+      <!-- Rechts uitgelijnd -->
       <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
-        <?php if ($u): ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="accountDropdown" role="button" data-bs-toggle="dropdown">
-              Mijn account
-            </a>
-            <ul class="dropdown-menu dropdown-menu-end">
-              <li><a class="dropdown-item" href="index.php?route=profile">Mijn profiel</a></li>
-              <?php if ($isSuper): ?>
-                <li><a class="dropdown-item" href="index.php?route=system_admin">Systeembeheer</a></li>
-              <?php endif; ?>
-              <li><hr class="dropdown-divider"></li>
-              <li><a class="dropdown-item" href="index.php?route=logout">Uitloggen</a></li>
-            </ul>
-          </li>
-          <li class="nav-item">
-            <span class="navbar-text ms-2"><?= e($u['name']) ?> (<?= e(role_label($role)) ?>)</span>
-          </li>
-        <?php else: ?>
-          <li class="nav-item">
-            <a class="btn btn-outline-light" href="index.php?route=login">Inloggen</a>
-          </li>
-        <?php endif; ?>
+        <!-- Account menu -->
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" id="accountDropdown" role="button" data-bs-toggle="dropdown">
+            Mijn account
+          </a>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li><a class="dropdown-item" href="index.php?route=profile">Mijn profiel</a></li>
+            <?php if ($isSuper): ?>
+              <li><a class="dropdown-item" href="index.php?route=system_admin">Systeembeheer</a></li>
+            <?php endif; ?>
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item" href="index.php?route=logout">Uitloggen</a></li>
+          </ul>
+        </li>
       </ul>
     </div>
+    <?php endif; ?>
   </div>
 </nav>
 
-<!-- Impersonatie-banner -->
+<!-- Impersonatie banner -->
 <?php if (!empty($_SESSION['impersonator_id'])): ?>
   <div class="bg-warning-subtle border-bottom border-warning">
     <div class="container py-2 d-flex justify-content-between align-items-center">
       <div>
-        Je bent momenteel ingelogd als <strong><?= e($u['name'] ?? '') ?> (<?= e($u['role'] ?? '') ?>)</strong>.
+        Je bent momenteel ingelogd als <strong><?= e($u['name']) ?> (<?= e($u['role']) ?>)</strong>.
       </div>
       <form method="post" action="index.php?route=impersonate_stop" class="m-0">
-        <?php if (function_exists('csrf_field')) csrf_field(); ?>
+        <?php csrf_field(); ?>
         <button class="btn btn-sm btn-outline-dark">Terug naar mijn account</button>
       </form>
     </div>

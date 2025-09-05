@@ -1,118 +1,116 @@
 <?php
-declare(strict_types=1);
-
 /**
- * helpers.php — algemene hulpfuncties voor SeguiloConnect
+ * helpers.php — centrale helpers voor Seguilo Connect
+ * - Zorgt voor stabiele sessies (1 vaste sessienaam)
+ * - Leest config in
+ * - Biedt CSRF, DB, auth_user en kleine util-functies
  */
 
+/* ===========================
+ *  Sessie & basis helpers
+ * =========================== */
+
+if (!function_exists('app_session_start')) {
+    function app_session_start(): void
+    {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            return;
+        }
+
+        // Vaste sessienaam om conflicten met andere PHP-sites op dezelfde host te voorkomen
+        if (session_name() !== 'seguilo_sess') {
+            session_name('seguilo_sess');
+        }
+
+        // Veilige cookie-instellingen
+        $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+            || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+
+        session_set_cookie_params([
+            'lifetime' => 0,
+            'path'     => '/',
+            // Tip: gebruik óf 1 vaste host via .htaccess, óf zet expliciet een domein:
+            // 'domain'   => '.seguilo-connect.nl',
+            'secure'   => $isHttps,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+
+        // voorkom URL-sessies
+        if (function_exists('ini_set')) {
+            @ini_set('session.use_trans_sid', '0');
+            @ini_set('session.use_cookies', '1');
+            @ini_set('session.use_only_cookies', '1');
+        }
+
+        @session_start();
+
+        // Oude PHPSESSID-cookie opruimen (kan dubbele sessies veroorzaken)
+        if (!empty($_COOKIE['PHPSESSID'])) {
+            $past = time() - 3600;
+            foreach (['/','/index.php',''] as $p) {
+                @setcookie('PHPSESSID', '', $past, $p, '', $isHttps, true);
+            }
+            unset($_COOKIE['PHPSESSID']);
+        }
+    }
+}
+
+if (!function_exists('e')) {
+    /** Veilig escapen voor HTML output */
+    function e(?string $v): string
+    {
+        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    }
+}
+
 if (!function_exists('app_config')) {
-    function app_config(): array {
+    /** Laad config.php éénmalig in (verwacht array return) */
+    function app_config(): array
+    {
         static $cfg = null;
         if ($cfg !== null) return $cfg;
-        $path = __DIR__ . '/config.php';
-        if (!is_file($path)) {
-            throw new RuntimeException('config.php niet gevonden');
+
+        $file = __DIR__ . '/config.php';
+        if (!is_file($file)) {
+            // fallback: probeer 1 map omhoog
+            $alt = dirname(__DIR__) . '/config.php';
+            if (is_file($alt)) $file = $alt;
         }
-        $cfg = require $path;
+        if (!is_file($file)) {
+            throw new RuntimeException('config.php niet gevonden.');
+        }
+        $cfg = require $file;
         if (!is_array($cfg)) {
-            throw new RuntimeException('config.php leverde geen array op');
+            throw new RuntimeException('config.php moet een array retourneren.');
         }
         return $cfg;
     }
 }
 
-if (!function_exists('app_session_start')) {
-    function app_session_start(): void {
-        if (session_status() !== PHP_SESSION_ACTIVE) {
-            $cfg = app_config();
-            $name = $cfg['app']['session_name'] ?? 'seguilo_sess';
-            if (!headers_sent()) {
-                session_name($name);
-                session_set_cookie_params([
-                    'lifetime' => 0,
-                    'path'     => '/',
-                    'domain'   => '',
-                    'secure'   => !empty($_SERVER['HTTPS']),
-                    'httponly' => true,
-                    'samesite' => 'Lax',
-                ]);
-            }
-            @session_start();
-        }
-        if (!isset($_SESSION['_flash'])) $_SESSION['_flash'] = [];
-    }
-}
-
-if (!function_exists('db')) {
-    function db(): PDO {
-        static $pdo = null;
-        if ($pdo instanceof PDO) return $pdo;
-
-        $cfg = app_config();
-        $db  = $cfg['db'] ?? [];
-        $host = $db['host'] ?? 'localhost';
-        $name = $db['name'] ?? '';
-        $user = $db['user'] ?? '';
-        $pass = $db['pass'] ?? '';
-        $port = (string)($db['port'] ?? '3306');
-        $charset = 'utf8mb4';
-
-        $dsn = "mysql:host={$host};port={$port};dbname={$name};charset={$charset}";
-        $opt = [
-            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES   => false,
-        ];
-        $pdo = new PDO($dsn, $user, $pass, $opt);
-        $pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
-        return $pdo;
-    }
-}
-
-if (!function_exists('e')) {
-    function e(?string $v): string {
-        return htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    }
-}
-
 if (!function_exists('base_url')) {
-    function base_url(): string {
+    /** Bepaal basis-URL (uit config of afgeleid) */
+    function base_url(): string
+    {
         $cfg = app_config();
         if (!empty($cfg['app']['base_url'])) {
             return rtrim($cfg['app']['base_url'], '/');
         }
-        $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
-        $scheme = $https ? 'https' : 'http';
-        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $script = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
-        $dir = rtrim(str_replace('index.php', '', $script), '/');
-        return $scheme . '://' . $host . $dir;
+        $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host  = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $dir   = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/.');
+        return rtrim($https . '://' . $host . ($dir ? $dir : ''), '/');
     }
 }
 
-if (!function_exists('redirect')) {
-    function redirect(string $url): void {
-        if (!preg_match('~^https?://~i', $url)) {
-            if (str_starts_with($url, '/')) {
-                $url = rtrim(base_url(), '/') . $url;
-            } elseif (!str_starts_with($url, 'index.php')) {
-                $url = rtrim(base_url(), '/') . '/' . ltrim($url, '/');
-            } else {
-                $url = rtrim(base_url(), '/') . '/' . $url;
-            }
-        }
-        if (!headers_sent()) {
-            header('Location: ' . $url);
-            exit;
-        }
-        echo '<script>location.href='.json_encode($url).';</script>';
-        echo '<noscript><meta http-equiv="refresh" content="0;url='.e($url).'"></noscript>';
-        exit;
-    }
-}
+/* ===========================
+ *  CSRF Helpers
+ * =========================== */
 
 if (!function_exists('csrf_token')) {
-    function csrf_token(): string {
+    function csrf_token(): string
+    {
+        app_session_start();
         if (empty($_SESSION['_csrf_token'])) {
             $_SESSION['_csrf_token'] = bin2hex(random_bytes(32));
         }
@@ -121,127 +119,217 @@ if (!function_exists('csrf_token')) {
 }
 
 if (!function_exists('csrf_field')) {
-    function csrf_field(): void {
-        echo '<input type="hidden" name="_token" value="'.e(csrf_token()).'">';
+    function csrf_field(): void
+    {
+        $t = e(csrf_token());
+        echo '<input type="hidden" name="_token" value="' . $t . '">';
     }
 }
 
 if (!function_exists('verify_csrf')) {
-    function verify_csrf(): void {
-        $post = $_POST['_token'] ?? '';
-        $sess = $_SESSION['_csrf_token'] ?? '';
-        if (!is_string($post) || !is_string($sess) || $post === '' || !hash_equals($sess, $post)) {
-            throw new RuntimeException('Invalid CSRF token');
+    function verify_csrf(): void
+    {
+        app_session_start();
+        $sessionToken = $_SESSION['_csrf_token'] ?? null;
+        $posted       = $_POST['_token'] ?? $_GET['_token'] ?? null;
+        if (!$sessionToken || !$posted || !hash_equals((string)$sessionToken, (string)$posted)) {
+            throw new RuntimeException('Ongeldig CSRF-token.');
         }
     }
 }
 
+/* ===========================
+ *  Database connectie
+ * =========================== */
+
+if (!function_exists('db')) {
+    /**
+     * db(): gedeelde PDO-verbinding (singleton per request)
+     * Probeert bekende paden, valt terug op config.php['db']
+     */
+    function db(): PDO
+    {
+        if (isset($GLOBALS['pdo']) && $GLOBALS['pdo'] instanceof PDO) {
+            return $GLOBALS['pdo'];
+        }
+
+        // 1) Probeer veelgebruikte include-paden die $pdo zetten
+        foreach ([__DIR__ . '/db.php', __DIR__ . '/includes/db.php', __DIR__ . '/config/db.php'] as $f) {
+            if (is_file($f)) {
+                require_once $f;
+                if (isset($GLOBALS['pdo']) && $GLOBALS['pdo'] instanceof PDO) {
+                    return $GLOBALS['pdo'];
+                }
+            }
+        }
+
+        // 2) Val terug op config.php
+        $cfg = app_config();
+        $db  = $cfg['db'] ?? [];
+
+        if (!empty($db['dsn'])) {
+            $pdo = new PDO(
+                $db['dsn'],
+                $db['user'] ?? null,
+                $db['pass'] ?? null,
+                [
+                    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::ATTR_EMULATE_PREPARES   => false,
+                ]
+            );
+            return $GLOBALS['pdo'] = $pdo;
+        }
+
+        $host    = $db['host'] ?? 'localhost';
+        $name    = $db['name'] ?? ($db['database'] ?? '');
+        $user    = $db['user'] ?? ($db['username'] ?? '');
+        $pass    = $db['pass'] ?? ($db['password'] ?? '');
+        $charset = $db['charset'] ?? 'utf8mb4';
+
+        if ($name === '') {
+            throw new RuntimeException('DB-naam ontbreekt in config.');
+        }
+
+        $pdo = new PDO(
+            "mysql:host={$host};dbname={$name};charset={$charset}",
+            $user,
+            $pass,
+            [
+                PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES   => false,
+            ]
+        );
+        return $GLOBALS['pdo'] = $pdo;
+    }
+}
+
+// --- Flash messages ---
 if (!function_exists('flash_set')) {
-    function flash_set(string $type, string $message): void {
-        $_SESSION['_flash'][] = ['type'=>$type, 'msg'=>$message];
+    /**
+     * Sla een melding op voor de volgende request.
+     * $type: 'success' | 'info' | 'warning' | 'danger'
+     */
+    function flash_set(string $type, string $message): void
+    {
+        app_session_start();
+        $_SESSION['_flash'][] = ['type' => $type, 'message' => $message];
     }
 }
-if (!function_exists('flash_get')) {
-    function flash_get(): array {
-        $items = $_SESSION['_flash'] ?? [];
-        $_SESSION['_flash'] = [];
-        return $items;
+
+if (!function_exists('flash_all')) {
+    /** Haal alle flash-berichten op en wis ze direct. */
+    function flash_all(): array
+    {
+        app_session_start();
+        $msgs = $_SESSION['_flash'] ?? [];
+        unset($_SESSION['_flash']);
+        return $msgs;
     }
 }
+
 if (!function_exists('flash_output')) {
-    function flash_output(): string {
+    /** Render alle flash-berichten als Bootstrap alerts. */
+    function flash_output(): string
+    {
         $out = '';
-        foreach (flash_get() as $f) {
-            $type = preg_replace('/[^a-z]/i', '', (string)($f['type'] ?? 'info'));
-            $msg  = (string)($f['msg'] ?? '');
-            $out .= '<div class="alert alert-'.e($type).'">'.$msg.'</div>';
+        foreach (flash_all() as $f) {
+            $type = $f['type'] ?? 'info';
+            $msg  = e($f['message'] ?? '');
+            $out .= '<div class="alert alert-' . e($type) . ' alert-dismissible fade show" role="alert">'
+                 .  $msg
+                 .  '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>'
+                 .  '</div>';
         }
         return $out;
     }
 }
 
-if (!function_exists('role_label')) {
-    function role_label(?string $role): string {
-        return match ($role) {
-            'super_admin'   => 'Super-admin',
-            'reseller'      => 'Reseller',
-            'sub_reseller'  => 'Sub-reseller',
-            'customer'      => 'Eindklant',
-            default         => ucfirst((string)$role),
-        };
-    }
-}
+/* ===========================
+ *  Authenticatie helpers
+ * =========================== */
 
-/** Feature flags (optioneel) */
-if (!function_exists('feature_allowed_for_user')) {
-    function feature_allowed_for_user(PDO $pdo, array $user, string $featureKey): bool {
-        $role  = (string)($user['role'] ?? '');
-        $userId= (int)($user['id'] ?? 0);
-
-        try {
-            $st = $pdo->prepare("SELECT allowed FROM user_feature WHERE user_id=? AND feature_key=?");
-            $st->execute([$userId, $featureKey]);
-            $ov = $st->fetchColumn();
-            if ($ov !== false) return ((int)$ov === 1);
-        } catch (Throwable $e) {}
-
-        try {
-            $st = $pdo->prepare("SELECT allowed FROM role_feature WHERE role_name=? AND feature_key=?");
-            $st->execute([$role, $featureKey]);
-            $rv = $st->fetchColumn();
-            if ($rv !== false) return ((int)$rv === 1);
-        } catch (Throwable $e) {}
-
-        if ($role === 'super_admin') return true;
-        return false;
-    }
-}
-
-if (!function_exists('column_exists')) {
-    function column_exists(PDO $pdo, string $table, string $column): bool {
-        $q = $pdo->quote($column);
-        $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
-        return (bool)($st && $st->fetch(PDO::FETCH_ASSOC));
-    }
-}
-
-if (!function_exists('build_tree_ids')) {
-    function build_tree_ids(PDO $pdo, int $rootId): array {
-        if (!column_exists($pdo, 'users', 'parent_user_id')) return [$rootId];
-        $ids  = [$rootId];
-        $seen = [$rootId => true];
-        $queue = [$rootId];
-        while ($queue) {
-            $chunk = array_splice($queue, 0, 200);
-            if (!$chunk) break;
-            $ph = implode(',', array_fill(0, count($chunk), '?'));
-            $st = $pdo->prepare("SELECT id FROM users WHERE parent_user_id IN ($ph)");
-            $st->execute($chunk);
-            foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $cid) {
-                $cid = (int)$cid;
-                if (!isset($seen[$cid])) {
-                    $seen[$cid] = true;
-                    $ids[] = $cid;
-                    $queue[] = $cid;
-                }
-            }
+if (!function_exists('auth_user')) {
+    /**
+     * auth_user(): haal de ingelogde gebruiker op via $_SESSION['user_id'].
+     * - Per-request cache (op basis van sessie user_id)
+     */
+    function auth_user(): ?array
+    {
+        app_session_start();
+        if (empty($_SESSION['user_id'])) {
+            return null;
         }
-        return $ids;
+
+        static $cachedUserId = null;
+        static $cachedUser   = null;
+
+        if ($cachedUser !== null && $cachedUserId === (int)$_SESSION['user_id']) {
+            return $cachedUser;
+        }
+
+        try {
+            $pdo = db();
+            $st  = $pdo->prepare(
+                "SELECT id, name, email, role, is_active
+                 FROM users
+                 WHERE id = ?
+                 LIMIT 1"
+            );
+            $st->execute([ (int)$_SESSION['user_id'] ]);
+            $user = $st->fetch(PDO::FETCH_ASSOC) ?: null;
+        } catch (Throwable $e) {
+            // Bij DB-probleem: beschouw als niet ingelogd
+            return null;
+        }
+
+        $cachedUserId = (int)$_SESSION['user_id'];
+        $cachedUser   = $user;
+
+        return $user;
     }
 }
 
-if (!function_exists('request_method')) {
-    function request_method(): string {
-        return strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+/* ===========================
+ *  Kleine util-functies
+ * =========================== */
+
+if (!function_exists('role_label')) {
+    function role_label(?string $role): string
+    {
+        $map = [
+            'super_admin'  => 'Super-admin',
+            'reseller'     => 'Reseller',
+            'sub_reseller' => 'Sub-reseller',
+            'customer'     => 'Eindklant',
+        ];
+        // Eventuele constanten ondersteunen
+        if (defined('ROLE_SUPER') && $role === ROLE_SUPER)               return 'Super-admin';
+        if (defined('ROLE_RESELLER') && $role === ROLE_RESELLER)         return 'Reseller';
+        if (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER)   return 'Sub-reseller';
+        if (defined('ROLE_CUSTOMER') && $role === ROLE_CUSTOMER)         return 'Eindklant';
+
+        return $map[$role] ?? (string)$role;
     }
 }
-if (!function_exists('is_post')) {
-    function is_post(): bool {
-        return request_method() === 'POST';
+
+if (!function_exists('redirect')) {
+  function redirect(string $url, int $status = 302): void
+  {
+    // Normaliseer URL (relatief naar index.php toelaten)
+    if ($url === '') { $url = 'index.php'; }
+
+    // Als headers nog niet verzonden zijn: gewone header-redirect
+    if (!headers_sent()) {
+      header('Location: ' . $url, true, $status);
+      exit;
     }
-}
-if (!function_exists('current_route')) {
-    function current_route(): string {
-        return (string)($_GET['route'] ?? 'dashboard');
-    }
+
+    // Fallback: headers al verzonden -> JS + <noscript> refresh
+    $safeUrl = htmlspecialchars($url, ENT_QUOTES, 'UTF-8');
+    echo '<script>window.location.href = ' . json_encode($url) . ';</script>';
+    echo '<noscript><meta http-equiv="refresh" content="0;url=' . $safeUrl . '"></noscript>';
+    exit;
+  }
 }
