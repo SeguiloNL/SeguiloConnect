@@ -79,7 +79,7 @@ $isMgr    = ($isSuper || $isRes || $isSubRes);
             Mijn account
           </a>
           <ul class="dropdown-menu dropdown-menu-end">
-            <li><a class="dropdown-item" href="index.php?route=profile">Mijn profiel</a></li>
+            <li><a href="<?= url('profile') ?>">Profiel</a></li>
             <?php if ($isSuper): ?>
               <li><a class="dropdown-item" href="index.php?route=system_admin">Systeembeheer</a></li>
             <?php endif; ?>
@@ -90,6 +90,16 @@ $isMgr    = ($isSuper || $isRes || $isSubRes);
       </ul>
     </div>
     <?php endif; ?>
+<?php if (is_super_admin()): ?>
+<li class="dropdown">
+  <a href="#">Admin</a>
+  <ul class="dropdown-menu">
+    <li><a href="<?= url('admin_users') ?>">Gebruikers</a></li>
+    <li><a href="<?= url('admin_integrations') ?>">Koppelingen</a></li>
+  </ul>
+</li>
+<?php endif; ?>
+
   </div>
 </nav>
 

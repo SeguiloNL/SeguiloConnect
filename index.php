@@ -141,9 +141,33 @@ try {
             require __DIR__ . '/pages/ajax_sims_search.php';
             break;
 
-        case 'profile':
-            require __DIR__ . '/pages/profile.php';
+        case 'admin_users':           
+            require 'admin/users.php'; 
             break;
+
+        case 'admin_user_edit':       
+            require 'admin/user_edit.php'; 
+            break;
+
+        case 'admin_do_user_save':    
+            require 'admin/do_user_save.php'; 
+            break;
+            
+        case 'admin_do_user_toggle':  
+            require 'admin/do_user_toggle.php'; 
+            break;
+
+        case 'profile': 
+            require 'pages/profile.php'; 
+            break;
+
+        case 'do_change_password': 
+            require 'pages/do_change_password.php'; 
+            break;
+
+
+
+
 
         case 'system_users':
             require __DIR__ . '/pages/system_users.php';
