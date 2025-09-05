@@ -22,27 +22,25 @@ if (!function_exists('app_config')) {
 }
 
 if (!function_exists('app_session_start')) {
-function app_session_start(): void {
-    if (session_status() !== PHP_SESSION_ACTIVE) {
-        $cfg = app_config();
-        $name   = $cfg['app']['session_name'] ?? 'seguilo_sess';
-        $domain = $cfg['app']['cookie_domain'] ?? '';       // <-- nieuw
-        $secure = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
-
-        if (!headers_sent()) {
-            session_name($name);
-            session_set_cookie_params([
-                'lifetime' => 0,
-                'path'     => '/',
-                'domain'   => $domain ?: '',                // zet domein als opgegeven
-                'secure'   => $secure,
-                'httponly' => true,
-                'samesite' => 'Lax',
-            ]);
+    function app_session_start(): void {
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            $cfg = app_config();
+            $name = $cfg['app']['session_name'] ?? 'seguilo_sess';
+            if (!headers_sent()) {
+                session_name($name);
+                session_set_cookie_params([
+                    'lifetime' => 0,
+                    'path'     => '/',
+                    'domain'   => '',
+                    'secure'   => !empty($_SERVER['HTTPS']),
+                    'httponly' => true,
+                    'samesite' => 'Lax',
+                ]);
+            }
+            @session_start();
         }
-        @session_start();
+        if (!isset($_SESSION['_flash'])) $_SESSION['_flash'] = [];
     }
-    if (!isset($_SESSION['_flash'])) $_SESSION['_flash'] = [];
 }
 
 if (!function_exists('db')) {

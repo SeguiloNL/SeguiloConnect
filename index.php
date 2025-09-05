@@ -1,15 +1,6 @@
 <?php
 declare(strict_types=1);
 
-// --- Canonical host redirect (voorkomt sessie-lekkage) ---
-$canonical = 'seguilo-connect.nl'; // <-- jouw keuze
-if (!empty($_SERVER['HTTP_HOST']) && strtolower($_SERVER['HTTP_HOST']) !== strtolower($canonical)) {
-    $https  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $uri    = $_SERVER['REQUEST_URI'] ?? '/';
-    header('Location: ' . $https . '://' . $canonical . $uri, true, 301);
-    exit;
-}
-
 /**
  * index.php — SeguiloConnect route autoloader (schoon en correct laadvolgorde)
  */
