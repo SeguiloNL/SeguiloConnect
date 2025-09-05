@@ -333,3 +333,34 @@ if (!function_exists('redirect')) {
     exit;
   }
 }
+
+// --- Backwards-compat shims (oude functienamen) ---
+if (!function_exists('is_logged_in')) {
+    function is_logged_in(): bool { return (bool) auth_user(); }
+}
+if (!function_exists('user')) {
+    function user() { return auth_user(); }
+}
+if (!function_exists('has_role')) {
+    function has_role(string $role): bool {
+        $u = auth_user();
+        if (!$u) return false;
+        if ($role === 'super_admin') return ($u['role'] ?? '') === 'super_admin';
+        if ($role === 'reseller') return ($u['role'] ?? '') === 'reseller';
+        if ($role === 'sub_reseller') return ($u['role'] ?? '') === 'sub_reseller';
+        if ($role === 'end_customer') return ($u['role'] ?? '') === 'end_customer';
+        return false;
+    }
+}
+if (!function_exists('is_super_admin')) {
+    function is_super_admin(): bool { return has_role('super_admin'); }
+}
+if (!function_exists('require_super_admin')) {
+    function require_super_admin(): void {
+        $u = auth_user();
+        if (!$u || ($u['role'] ?? '') !== 'super_admin') {
+            http_response_code(403);
+            exit('Forbidden');
+        }
+    }
+}
