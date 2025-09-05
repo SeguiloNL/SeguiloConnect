@@ -40,7 +40,8 @@ require __DIR__ . '/helpers.php';
 app_session_start();
 
 // ---- 1) Bepaal route ----
-$route = $_GET['route'] ?? (is_logged_in() ? 'dashboard' : 'login');
+$user  = auth_user();
+$route = $_GET['route'] ?? ($user ? 'dashboard' : 'login');
 $routes = [
   'login' => 'pages/login.php',
   'dashboard' => 'pages/dashboard.php',
