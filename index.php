@@ -1,14 +1,6 @@
 <?php
 
 require_once __DIR__ . '/helpers.php';
-app_session_start(); // zet dit meteen na de require
-
-// START SESSIE ZO VROEG MOGELIJK
-if (function_exists('app_session_start')) {
-    app_session_start();
-}
-
-require_once __DIR__ . '/helpers.php';
 app_session_start();
 include __DIR__ . '/views/header.php';
 
