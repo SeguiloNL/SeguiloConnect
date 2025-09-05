@@ -2,16 +2,13 @@
 declare(strict_types=1);
 
 /**
- * SeguiloConnect — index.php (core-fix)
- * - Hard debug (tijdelijk)
- * - Router met whitelist en duidelijke fouten
- * - Laadt helpers + compat-shims vóór alles
+ * SeguiloConnect — index.php (core-fix v2)
+ * Verschil met v1: ook de HEADER en FOOTER binnen try/catch,
+ * zodat fatals in header/footer zichtbaar worden.
  */
 
 // === DEBUG (tijdelijk AAN) ===
-if (!defined('SC_DEBUG')) {
-  define('SC_DEBUG', true);
-}
+if (!defined('SC_DEBUG')) define('SC_DEBUG', true);
 if (SC_DEBUG) {
   error_reporting(E_ALL);
   ini_set('display_errors', '1');
@@ -35,46 +32,29 @@ if (SC_DEBUG) {
 }
 
 // === BOOTSTRAP ===
-require_once __DIR__ . '/helpers.php';          // bestaande helpers
-if (is_file(__DIR__ . '/helpers_compat.php')) { // compat-laag (oude functienamen)
-  require_once __DIR__ . '/helpers_compat.php';
-}
-if (function_exists('app_session_start')) { app_session_start(); }
+require_once __DIR__ . '/helpers.php';
+if (is_file(__DIR__ . '/helpers_compat.php')) require_once __DIR__ . '/helpers_compat.php';
+if (function_exists('app_session_start')) app_session_start();
 
-// === ROUTE ===
 $route = $_GET['route'] ?? null;
-
-// Early handlers (POST)
-$early = [
-  'do_login','logout',
-  'impersonate_start','impersonate_stop',
-];
+$early = ['do_login','logout','impersonate_start','impersonate_stop'];
 if ($route && in_array($route, $early, true)) {
-  switch ($route) {
-    case 'do_login':           require __DIR__ . '/pages/do_login.php';           break;
-    case 'logout':             require __DIR__ . '/pages/logout.php';             break;
-    case 'impersonate_start':  require __DIR__ . '/pages/impersonate_start.php';  break;
-    case 'impersonate_stop':   require __DIR__ . '/pages/impersonate_stop.php';   break;
-  }
+  require __DIR__ . '/pages/' . $route . '.php';
   exit;
 }
 
-// === HEADER ===
-include __DIR__ . '/views/header.php';
-
 try {
+  // HEADER ook binnen try
+  include __DIR__ . '/views/header.php';
+
   // Whitelist
   $routes = [
     'login'               => 'pages/login.php',
     'dashboard'           => 'pages/dashboard.php',
-
-    // Users
     'users_list'          => 'pages/users_list.php',
     'user_add'            => 'pages/user_add.php',
     'user_edit'           => 'pages/user_edit.php',
     'user_delete'         => 'pages/user_delete.php',
-
-    // Sims
     'sims_list'           => 'pages/sims_list.php',
     'sim_add'             => 'pages/sim_add.php',
     'sim_edit'            => 'pages/sim_edit.php',
@@ -84,55 +64,40 @@ try {
     'sim_bulk_action'     => 'pages/sim_bulk_action.php',
     'sim_bulk_assign'     => 'pages/sim_bulk_assign.php',
     'sim_bulk_delete'     => 'pages/sim_bulk_delete.php',
-
-    // Orders
     'order_add'           => 'pages/order_add.php',
     'order_edit'          => 'pages/order_edit.php',
     'order_delete'        => 'pages/order_delete.php',
     'order_status'        => 'pages/order_status.php',
     'order_submit'        => 'pages/order_submit.php',
-
-    // Plans / settings
     'plans_list'          => 'pages/plans_list.php',
     'migrate_plans'       => 'pages/migrate_plans.php',
-
-    // System/admin
     'system_users'        => 'pages/system_users.php',
     'system_admin'        => 'pages/system_admin.php',
-
-    // Debug helpers
     '_whoami'             => 'pages/_whoami.php',
     '_phpinfo'            => 'pages/_phpinfo.php',
+    '_ok'                 => 'pages/_ok.php',
+    'healthcheck'         => 'pages/healthcheck.php',
   ];
 
   $user = function_exists('auth_user') ? auth_user() : null;
   $file = null;
-
   if ($route && isset($routes[$route])) {
     $file = __DIR__ . '/' . $routes[$route];
   } else {
-    // default
     $file = __DIR__ . '/' . ($user ? 'pages/dashboard.php' : 'pages/login.php');
   }
-
-  if (!is_file($file)) {
-    throw new RuntimeException('Route file missing: ' . $file);
-  }
+  if (!is_file($file)) throw new RuntimeException('Route file missing: ' . $file);
 
   require $file;
 
+  // FOOTER ook binnen try
+  include __DIR__ . '/views/footer.php';
+
 } catch (Throwable $t) {
   http_response_code(500);
-  if (SC_DEBUG) {
-    $msg = htmlspecialchars($t->getMessage(), ENT_QUOTES, 'UTF-8');
-    $fl  = htmlspecialchars($t->getFile(), ENT_QUOTES, 'UTF-8');
-    $ln  = (int)$t->getLine();
-    echo "<pre style='padding:16px;background:#300;color:#fee'>Route crash: {$msg}
+  $msg = htmlspecialchars($t->getMessage(), ENT_QUOTES, 'UTF-8');
+  $fl  = htmlspecialchars($t->getFile(), ENT_QUOTES, 'UTF-8');
+  $ln  = (int)$t->getLine();
+  echo "<pre style='padding:16px;background:#300;color:#fee'>CRASH: {$msg}
 {$fl}:{$ln}</pre>";
-  } else {
-    echo "<div class='container'><h2>Er ging iets mis</h2><p>Probeer het later opnieuw.</p></div>";
-  }
 }
-
-// === FOOTER ===
-include __DIR__ . '/views/footer.php';
