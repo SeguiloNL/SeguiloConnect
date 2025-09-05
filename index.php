@@ -36,10 +36,16 @@ ini_set('display_startup_errors', '1');
 error_reporting(E_ALL);
 
 require __DIR__ . '/helpers.php';
+
 app_session_start();
 
 // ---- 1) Bepaal route ----
-$route = $_GET['route'] ?? null;
+$route = $_GET['route'] ?? (is_logged_in() ? 'dashboard' : 'login');
+$routes = [
+  'login' => 'pages/login.php',
+  'dashboard' => 'pages/dashboard.php',
+  'profile' => 'pages/profile.php',
+];
 
 // ---- 2) Early routes (POST/redirect handlers) ----
 $earlyRoutes = [
@@ -80,6 +86,16 @@ if ($route === 'login' && auth_user()) {
 
 // ---- 5) Header tonen ----
 include __DIR__ . '/views/header.php';
+
+try {
+    if (!isset($routes[$route])) { throw new RuntimeException("Unknown route: $route"); }
+    $file = __DIR__ . '/' . $routes[$route];
+    if (!is_file($file)) { throw new RuntimeException("Route file missing: $file"); }
+    require $file;
+} catch (Throwable $t) {
+    http_response_code(500);
+    echo "<pre style='padding:16px;background:#221;color:#fee'>Route crash: " . e($t->getMessage()) . "\n" . e($t->getFile()) . ':' . $t->getLine() . "</pre>";
+}
 
 // ---- 6) Router voor views/pages ----
 try {
