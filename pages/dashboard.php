@@ -1,173 +1,64 @@
 <?php
-// pages/dashboard.php — Tegels met correcte scoping voor VOORRAAD
 require_once __DIR__ . '/../helpers.php';
+require_once __DIR__ . '/../auth.php';
+
 app_session_start();
 
 $me = auth_user();
-if (!$me) { header('Location: index.php?route=login'); exit; }
-
-$myId = (int)($me['id'] ?? 0);
-$role = (string)($me['role'] ?? '');
-$isSuper   = ($role === 'super_admin') || (defined('ROLE_SUPER') && $role === ROLE_SUPER);
-$isRes     = ($role === 'reseller')    || (defined('ROLE_RESELLER') && $role === ROLE_RESELLER);
-$isSubRes  = ($role === 'sub_reseller')|| (defined('ROLE_SUBRESELLER') && $role === ROLE_SUBRESELLER);
-
-try { $pdo = db(); }
-catch (Throwable $e) {
-  echo '<div class="alert alert-danger">Laden mislukt: '.e($e->getMessage()).'</div>';
-  return;
+if (!$me) {
+    // Niet ingelogd → terug naar login (heeft JS/meta fallback als headers al zijn verzonden)
+    redirect('index.php?route=login');
+    exit;
 }
 
-// -------- Helpers --------
-function column_exists(PDO $pdo, string $table, string $col): bool {
-  $q = $pdo->quote($col);
-  $st = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$q}");
-  return $st ? (bool)$st->fetch(PDO::FETCH_ASSOC) : false;
-}
-function build_tree_ids(PDO $pdo, int $rootId): array {
-  if (!column_exists($pdo,'users','parent_user_id')) return [$rootId];
-  $ids = [$rootId];
-  $seen = [$rootId => true];
-  $queue = [$rootId];
-  while ($queue) {
-    $chunk = array_splice($queue, 0, 200);
-    if (!$chunk) break;
-    $ph = implode(',', array_fill(0, count($chunk), '?'));
-    $st = $pdo->prepare("SELECT id FROM users WHERE parent_user_id IN ($ph)");
-    $st->execute($chunk);
-    foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $cid) {
-      $cid = (int)$cid;
-      if (!isset($seen[$cid])) { $seen[$cid]=true; $ids[]=$cid; $queue[]=$cid; }
-    }
-  }
-  return $ids;
-}
-
-// scope-ids voor orders/klanten (niet voor voorraad-teller)
-$scopeCustomerIds = [];
-if (!$isSuper) {
-  $scopeCustomerIds = build_tree_ids($pdo, $myId);
-  if (!$scopeCustomerIds) { $scopeCustomerIds = [$myId]; }
-}
-
-// ---------- Teller: Actieve SIM's (laatste order completed + sim bij eindklant) ----------
-try {
-  if ($isSuper) {
-    $sql = "
-      SELECT COUNT(DISTINCT s.id)
-      FROM sims s
-      JOIN users u ON u.id = s.assigned_to_user_id AND u.role = 'customer'
-      JOIN (SELECT sim_id, MAX(id) AS last_order_id FROM orders GROUP BY sim_id) lo ON lo.sim_id = s.id
-      JOIN orders o ON o.id = lo.last_order_id AND o.status = 'completed'
-    ";
-    $st = $pdo->prepare($sql);
-    $st->execute();
-  } else {
-    $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $sql = "
-      SELECT COUNT(DISTINCT s.id)
-      FROM sims s
-      JOIN users u ON u.id = s.assigned_to_user_id AND u.role = 'customer'
-      JOIN (SELECT sim_id, MAX(id) AS last_order_id FROM orders GROUP BY sim_id) lo ON lo.sim_id = s.id
-      JOIN orders o ON o.id = lo.last_order_id AND o.status = 'completed'
-      WHERE u.id IN ($ph)
-    ";
-    $st = $pdo->prepare($sql);
-    $st->execute($scopeCustomerIds);
-  }
-  $activeSims = (int)$st->fetchColumn();
-} catch (Throwable $e) {
-  echo '<div class="alert alert-warning">Actieve SIM’s tellen mislukt: '.e($e->getMessage()).'</div>';
-  $activeSims = 0;
-}
-
-// ---------- Teller: SIM's op voorraad ----------
-// Definitie: niet retired EN géén order met status in ('concept','awaiting_activation','completed').
-// Super-admin: ALLE voorraad; Reseller/Sub-reseller: ALLEEN eigen voorraad (assigned_to_user_id = $myId).
-try {
-  if ($isSuper) {
-    $sql = "
-      SELECT COUNT(*)
-      FROM sims s
-      WHERE (s.status IS NULL OR s.status <> 'retired')
-        AND NOT EXISTS (
-          SELECT 1 FROM orders o
-          WHERE o.sim_id = s.id
-            AND o.status IN ('concept','awaiting_activation','completed')
-        )
-    ";
-    $st = $pdo->prepare($sql);
-    $st->execute();
-  } else {
-    $sql = "
-      SELECT COUNT(*)
-      FROM sims s
-      WHERE (s.status IS NULL OR s.status <> 'retired')
-        AND s.assigned_to_user_id = ?
-        AND NOT EXISTS (
-          SELECT 1 FROM orders o
-          WHERE o.sim_id = s.id
-            AND o.status IN ('concept','awaiting_activation','completed')
-        )
-    ";
-    $st = $pdo->prepare($sql);
-    $st->execute([$myId]);
-  }
-  $stockSims = (int)$st->fetchColumn();
-} catch (Throwable $e) {
-  echo '<div class="alert alert-warning">Voorraad tellen mislukt: '.e($e->getMessage()).'</div>';
-  $stockSims = 0;
-}
-
-// ---------- Teller: Wachten op activatie ----------
-try {
-  if ($isSuper) {
-    $sql = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation'";
-    $st = $pdo->prepare($sql);
-    $st->execute();
-  } else {
-    $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $sql = "SELECT COUNT(*) FROM orders o WHERE o.status = 'awaiting_activation' AND o.customer_id IN ($ph)";
-    $st = $pdo->prepare($sql);
-    $st->execute($scopeCustomerIds);
-  }
-  $awaiting = (int)$st->fetchColumn();
-} catch (Throwable $e) {
-  echo '<div class="alert alert-warning">Aantal “Wachten op activatie” mislukt: '.e($e->getMessage()).'</div>';
-  $awaiting = 0;
-}
-
-// ---------- Teller: Actieve klanten ----------
-try {
-  if ($isSuper) {
-    $sql = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active = 1";
-    $st = $pdo->prepare($sql);
-    $st->execute();
-  } else {
-    $ph = implode(',', array_fill(0, count($scopeCustomerIds), '?'));
-    $sql = "SELECT COUNT(*) FROM users WHERE role='customer' AND is_active=1 AND id IN ($ph)";
-    $st = $pdo->prepare($sql);
-    $st->execute($scopeCustomerIds);
-  }
-  $activeCustomers = (int)$st->fetchColumn();
-} catch (Throwable $e) {
-  echo '<div class="alert alert-warning">Actieve klanten tellen mislukt: '.e($e->getMessage()).'</div>';
-  $activeCustomers = 0;
-}
-
-// -------- UI --------
 echo function_exists('flash_output') ? flash_output() : '';
+
+// Probeer DB te pakken; toon anders een zachte melding zodat de pagina nooit blanco is
+try {
+    $pdo = db();
+} catch (Throwable $e) {
+    $pdo = null;
+    echo '<div class="alert alert-warning">Database niet bereikbaar: ' . e($e->getMessage()) . '</div>';
+}
+
+// Simpele welkom + minimale tegels (zonder zware joins). Later kun je dit uitbreiden.
 ?>
+<div class="mb-4">
+  <h4 class="mb-1">Welkom, <?= e($me['name'] ?? 'gebruiker') ?></h4>
+  <div class="text-muted">Dit is je dashboard.</div>
+</div>
+
 <div class="row g-3">
+  <!-- Actieve SIMs -->
   <div class="col-md-3">
     <div class="card shadow-sm h-100">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="text-muted">Actieve SIM’s</div>
-            <div class="fs-3 fw-bold"><?= (int)$activeSims ?></div>
-          </div>
-          <div class="display-6 text-success"><i class="bi bi-sim"></i></div>
+        <div class="text-muted">Actieve SIM’s</div>
+        <div class="fs-3 fw-bold">
+          <?php
+          $countActive = 0;
+          if ($pdo) {
+            try {
+              // Veilige, lichte telling: SIMs met status 'active'
+              $sql = "SELECT COUNT(*) FROM sims WHERE status = 'active'";
+              // Scope voor resellers/sub-resellers: alleen eigen boom of eigen toewijzing
+              $role = $me['role'] ?? '';
+              if ($role !== 'super_admin') {
+                  // Toon alleen SIMs die aan eindklanten in jouw boom zijn toegewezen
+                  $ids = build_tree_ids($pdo, (int)$me['id']);
+                  if (!$ids) { $ids = [(int)$me['id']]; }
+                  $ph = implode(',', array_fill(0, count($ids), '?'));
+                  $sql .= " AND assigned_to_user_id IN ($ph)";
+                  $st = $pdo->prepare($sql);
+                  $st->execute($ids);
+              } else {
+                  $st = $pdo->query($sql);
+              }
+              $countActive = (int)$st->fetchColumn();
+            } catch (Throwable $e) { /* laat 0 zien */ }
+          }
+          echo (int)$countActive;
+          ?>
         </div>
       </div>
       <div class="card-footer bg-transparent border-0">
@@ -176,37 +67,78 @@ echo function_exists('flash_output') ? flash_output() : '';
     </div>
   </div>
 
+  <!-- SIM’s op voorraad (status != retired én geen order eraan gehangen) -->
   <div class="col-md-3">
     <div class="card shadow-sm h-100">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="text-muted">SIM’s op voorraad</div>
-            <div class="fs-3 fw-bold"><?= (int)$stockSims ?></div>
-          </div>
-          <div class="display-6 text-primary"><i class="bi bi-box-seam"></i></div>
+        <div class="text-muted">SIM’s op voorraad</div>
+        <div class="fs-3 fw-bold">
+          <?php
+          $countStock = 0;
+          if ($pdo) {
+            try {
+              $role = $me['role'] ?? '';
+              if ($role === 'super_admin') {
+                $sql = "
+                  SELECT COUNT(*)
+                  FROM sims s
+                  WHERE (s.status IS NULL OR s.status <> 'retired')
+                    AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.sim_id = s.id)
+                ";
+                $st = $pdo->query($sql);
+              } else {
+                $sql = "
+                  SELECT COUNT(*)
+                  FROM sims s
+                  WHERE (s.status IS NULL OR s.status <> 'retired')
+                    AND s.assigned_to_user_id = ?
+                    AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.sim_id = s.id)
+                ";
+                $st = $pdo->prepare($sql);
+                $st->execute([(int)$me['id']]);
+              }
+              $countStock = (int)$st->fetchColumn();
+            } catch (Throwable $e) { /* laat 0 zien */ }
+          }
+          echo (int)$countStock;
+          ?>
         </div>
       </div>
       <div class="card-footer bg-transparent border-0">
-        <?php if ($isSuper): ?>
+        <?php if (($me['role'] ?? '') === 'super_admin'): ?>
           <a class="stretched-link" href="index.php?route=sims_list&status=stock">Bekijken</a>
         <?php else: ?>
-          <!-- Je eigen voorraad; dezelfde lijst kan via filter op owner=myId -->
           <a class="stretched-link" href="index.php?route=sims_list&status=stock&owner=me">Bekijken</a>
         <?php endif; ?>
       </div>
     </div>
   </div>
 
+  <!-- Wachten op activatie -->
   <div class="col-md-3">
     <div class="card shadow-sm h-100">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="text-muted">Wachten op activatie</div>
-            <div class="fs-3 fw-bold"><?= (int)$awaiting ?></div>
-          </div>
-          <div class="display-6 text-warning"><i class="bi bi-hourglass-split"></i></div>
+        <div class="text-muted">Wachten op activatie</div>
+        <div class="fs-3 fw-bold">
+          <?php
+          $countAwait = 0;
+          if ($pdo) {
+            try {
+              $role = $me['role'] ?? '';
+              if ($role === 'super_admin') {
+                $st = $pdo->query("SELECT COUNT(*) FROM orders WHERE status = 'awaiting_activation'");
+              } else {
+                $ids = build_tree_ids($pdo, (int)$me['id']);
+                if (!$ids) { $ids = [(int)$me['id']]; }
+                $ph = implode(',', array_fill(0, count($ids), '?'));
+                $st = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE status='awaiting_activation' AND customer_id IN ($ph)");
+                $st->execute($ids);
+              }
+              $countAwait = (int)$st->fetchColumn();
+            } catch (Throwable $e) { /* 0 */ }
+          }
+          echo (int)$countAwait;
+          ?>
         </div>
       </div>
       <div class="card-footer bg-transparent border-0">
@@ -215,15 +147,31 @@ echo function_exists('flash_output') ? flash_output() : '';
     </div>
   </div>
 
+  <!-- Actieve klanten -->
   <div class="col-md-3">
     <div class="card shadow-sm h-100">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="text-muted">Actieve klanten</div>
-            <div class="fs-3 fw-bold"><?= (int)$activeCustomers ?></div>
-          </div>
-          <div class="display-6 text-info"><i class="bi bi-people"></i></div>
+        <div class="text-muted">Actieve klanten</div>
+        <div class="fs-3 fw-bold">
+          <?php
+          $countCustomers = 0;
+          if ($pdo) {
+            try {
+              $role = $me['role'] ?? '';
+              if ($role === 'super_admin') {
+                $st = $pdo->query("SELECT COUNT(*) FROM users WHERE role='customer' AND is_active=1");
+              } else {
+                $ids = build_tree_ids($pdo, (int)$me['id']);
+                if (!$ids) { $ids = [(int)$me['id']]; }
+                $ph = implode(',', array_fill(0, count($ids), '?'));
+                $st = $pdo->prepare("SELECT COUNT(*) FROM users WHERE role='customer' AND is_active=1 AND id IN ($ph)");
+                $st->execute($ids);
+              }
+              $countCustomers = (int)$st->fetchColumn();
+            } catch (Throwable $e) { /* 0 */ }
+          }
+          echo (int)$countCustomers;
+          ?>
         </div>
       </div>
       <div class="card-footer bg-transparent border-0">
