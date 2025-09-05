@@ -10,9 +10,13 @@ return [
         'pass'    => 'zhvCT7VVbk2Kdy4NEndc',
         'charset' => 'utf8mb4',
     ],
-    'app' => [
-        // If the app is not in the domain root, set e.g. '/portal'
-        'base_url' => '',
-        'app_name' => 'Seguilo Connect'
-    ],
+    // config.php
+return [
+  'app' => [
+    'app_name' => 'SeguiloConnect',
+    'base_url' => 'https://seguilo-connect.nl',   // <-- vaste URL
+    'session_name' => 'seguilo_sess',
+    'cookie_domain' => 'seguilo-connect.nl',      // <-- belangrijk
+  ],
+  'db' => [ /* ... */ ],
 ];

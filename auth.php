@@ -23,11 +23,13 @@ if (!function_exists('auth_user')) {
 
 if (!function_exists('auth_login')) {
     function auth_login(array $user): void {
-        app_session_start();
-        $_SESSION['user_id'] = (int)$user['id'];
-        // reset impersonation bij normale login
-        unset($_SESSION['impersonator_id']);
+    app_session_start();
+    // regenereer sessie-id bij login
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_regenerate_id(true);
     }
+    $_SESSION['user_id'] = (int)$user['id'];
+    unset($_SESSION['impersonator_id']);
 }
 
 if (!function_exists('auth_logout')) {
