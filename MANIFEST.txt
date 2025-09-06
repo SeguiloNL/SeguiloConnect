@@ -1,0 +1,27 @@
+MDO Portal — Bestandsmanifest
+Aangemaakt: 2025-09-06T15:19:02.959728
+
+MANIFEST.txt	115 bytes	md5:32fc56a974
+README.txt	1702 bytes	md5:70c5778d95
+config.sample.php	291 bytes	md5:ab31c3a4ee
+db.php	517 bytes	md5:09b13f0d6c
+index.php	14302 bytes	md5:798721c6be
+schema.sql	2668 bytes	md5:473b3d088d
+lib/auth.php	1923 bytes	md5:889f1ec058
+lib/helpers.php	792 bytes	md5:0de09c8c78
+views/admin.php	508 bytes	md5:2eb090e6a8
+views/dashboard.php	1579 bytes	md5:4d48db3bb0
+views/login.php	928 bytes	md5:8279157e65
+views/order_edit.php	2571 bytes	md5:b792465ece
+views/order_status.php	916 bytes	md5:f29a52b04f
+views/orders_list.php	1323 bytes	md5:5bcd9aa478
+views/plan_edit.php	1195 bytes	md5:b1c33a142f
+views/plans_list.php	1114 bytes	md5:cd91eb1cf7
+views/simcard_edit.php	1592 bytes	md5:9792c3d1d8
+views/simcards_list.php	1228 bytes	md5:23c269b22e
+views/supplier_edit.php	1176 bytes	md5:aeefa74fcf
+views/suppliers_list.php	1074 bytes	md5:1316140b3e
+views/user_edit.php	2947 bytes	md5:4b2dfd773b
+views/users_list.php	1271 bytes	md5:eb5cfd379b
+views/partials/footer.php	124 bytes	md5:099a1c98eb
+views/partials/header.php	2849 bytes	md5:d407d361ac
